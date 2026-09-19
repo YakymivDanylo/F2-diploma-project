@@ -1,0 +1,25 @@
+filters:
+  and:
+    - file.inFolder("F2_Diploma_Yakymiv_DR/Calendar-Plan")
+properties:
+  stage_no:
+    displayName: № з/п
+  stage_name:
+    displayName: Назва етапу кваліфікаційної роботи
+  deadline:
+    displayName: Термін виконання етапів проєкту
+  status:
+    displayName: Примітка / Статус виконання
+views:
+  - type: table
+    name: Календарний план
+    order:
+      - stage_no
+      - stage_name
+      - deadline
+      - status
+    sort:
+      - property: stage_no
+        direction: ASC
+    columnSize:
+      note.stage_name: 644
