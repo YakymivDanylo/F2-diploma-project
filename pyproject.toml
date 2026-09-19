@@ -7,7 +7,9 @@ name = "diploma-blockchain"
 version = "0.1.0"
 description = "Decentralized document verification system on a custom blockchain"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "cryptography>=42.0"
+]
 
 [project.optional-dependencies]
 dev = [
@@ -34,3 +36,7 @@ packages = ["blockchain_core"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/blockchain_core"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
