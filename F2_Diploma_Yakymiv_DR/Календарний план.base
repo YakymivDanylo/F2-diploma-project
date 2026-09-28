@@ -10,6 +10,12 @@ properties:
     displayName: Термін виконання етапів проєкту
   status:
     displayName: Примітка / Статус виконання
+  task_ref:
+    displayName: Завдання наукового апарату
+  start:
+    displayName: Початок
+  end:
+    displayName: Завершення
 views:
   - type: table
     name: Календарний план
@@ -18,6 +24,9 @@ views:
       - stage_name
       - deadline
       - status
+      - task_ref
     sort:
       - property: stage_no
         direction: ASC
+    columnSize:
+      note.stage_name: 644
