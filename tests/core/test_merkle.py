@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
-
 import pytest
 
 from blockchain_core.canonical import canonicalize
@@ -49,7 +47,7 @@ def _naive_duplicating_root(leaves: list[str]) -> str:
 
 def test_leaf_hash_matches_domain_separated_formula():
   record = _record(0)
-  expected = sha256_hex(b"\x00" + canonicalize(asdict(record)))
+  expected = sha256_hex(b"\x00" + canonicalize(record.signed_dict()))
   assert leaf_hash(record) == expected
 
 

@@ -22,7 +22,7 @@ _ISSUER = generate_keypair()
 _ISSUER_ID = "issuer-1"
 
 
-def _resolve_issuer_key(issuer_id: str):
+def _resolve_issuer_key(issuer_id: str, at_timestamp: int):
   if issuer_id == _ISSUER_ID:
     return _ISSUER.public_key
   return None

@@ -1,4 +1,18 @@
-from .canonical import CanonicalizationError, canonicalize
+from .block import (
+  Block,
+  DuplicateDocumentHashError,
+  InvalidBlockParametersError,
+  InvalidRecordSignatureError,
+  attach_proposer_signature,
+  build_candidate_block,
+)
+from .canonical import CanonicalizationError, canonicalize, deep_freeze
+from .chain import (
+  Chain,
+  InvalidBlockHashError,
+  NonSequentialIndexError,
+  StalePreviousHashError,
+)
 from .document_record import (
   DocumentRecord,
   InvalidDocumentHashError,
@@ -6,17 +20,33 @@ from .document_record import (
   create_document_record,
   verify_document_record,
 )
+from .genesis import GENESIS_BLOCK_HASH, build_genesis_block
 from .hashing import sha256_hex, sha256_of_canonical
 from .keys import (
   InsufficientKeySizeError,
+  IssuerKeyPair,
   KeyPair,
+  KeyResolver,
+  NodeKeyPair,
   UnsupportedAlgorithmError,
+  WrongKeyRoleError,
   algorithm_of,
+  generate_issuer_keypair,
   generate_keypair,
+  generate_node_keypair,
   private_key_from_pem,
   private_key_to_pem,
   public_key_from_pem,
   public_key_to_pem,
+)
+from .merkle import (
+  DocumentHashNotFoundError,
+  EmptyBatchError,
+  ProofStep,
+  build_proof,
+  build_root,
+  verify_leaf_hash_proof,
+  verify_proof,
 )
 from .signing import sign_bytes, sign_canonical, verify_bytes, verify_canonical
 from .storage.key_store import (
@@ -26,22 +56,54 @@ from .storage.key_store import (
   load_key_pair,
   save_key_pair,
 )
+from .validation import (
+  InvalidChainInputError,
+  ValidationResult,
+  validate_chain,
+  validate_extension,
+)
 
 __all__ = [
+  "GENESIS_BLOCK_HASH",
+  "Block",
   "CanonicalizationError",
+  "Chain",
+  "DocumentHashNotFoundError",
   "DocumentRecord",
+  "DuplicateDocumentHashError",
+  "EmptyBatchError",
   "InsufficientKeySizeError",
+  "InvalidBlockHashError",
+  "InvalidBlockParametersError",
+  "InvalidChainInputError",
   "InvalidDocumentHashError",
+  "InvalidRecordSignatureError",
+  "IssuerKeyPair",
   "KeyPair",
+  "KeyResolver",
   "KeyStoreCorruptedError",
   "KeyStoreExistsError",
   "KeyStoreMissingError",
   "MissingDocumentFieldError",
+  "NodeKeyPair",
+  "NonSequentialIndexError",
+  "ProofStep",
+  "StalePreviousHashError",
   "UnsupportedAlgorithmError",
+  "ValidationResult",
+  "WrongKeyRoleError",
   "algorithm_of",
+  "attach_proposer_signature",
+  "build_candidate_block",
+  "build_genesis_block",
+  "build_proof",
+  "build_root",
   "canonicalize",
   "create_document_record",
+  "deep_freeze",
+  "generate_issuer_keypair",
   "generate_keypair",
+  "generate_node_keypair",
   "load_key_pair",
   "private_key_from_pem",
   "private_key_to_pem",
@@ -52,7 +114,11 @@ __all__ = [
   "sha256_of_canonical",
   "sign_bytes",
   "sign_canonical",
+  "validate_chain",
+  "validate_extension",
   "verify_bytes",
   "verify_canonical",
   "verify_document_record",
+  "verify_leaf_hash_proof",
+  "verify_proof",
 ]

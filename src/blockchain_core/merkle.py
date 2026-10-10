@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Literal
 
 from .canonical import canonicalize
 from .document_record import DocumentRecord
-from .hashing import sha256_hex
+from .hashing import HEX64_RE, sha256_hex
 
 _LEAF_PREFIX = b"\x00"
 _INTERNAL_PREFIX = b"\x01"
-_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class EmptyBatchError(ValueError):
@@ -53,7 +51,7 @@ def leaf_hash(record: DocumentRecord) -> str:
   unique within the batch; that uniqueness is enforced upstream (Slice 4's
   block builder, UC-2-E3), not here.
   """
-  return sha256_hex(_LEAF_PREFIX + canonicalize(asdict(record)))
+  return sha256_hex(_LEAF_PREFIX + canonicalize(record.signed_dict()))
 
 def _internal_hash(left: str, right: str) -> str:
   """Domain-separated internal-node hash: H(0x01 || left_hash || right_hash)."""
@@ -123,15 +121,15 @@ def _verify_leaf_hash(current: str, proof: Sequence[ProofStep], claimed_root: st
   matching this codebase's "verification functions return bool, never raise" convention
   (see `verify_document_record`).
   """
-  if not _HEX64_RE.fullmatch(current):
+  if not HEX64_RE.fullmatch(current):
     return False
   for step in proof:
     if step.position == "right":
-      if step.sibling_hash is None or not _HEX64_RE.fullmatch(step.sibling_hash):
+      if step.sibling_hash is None or not HEX64_RE.fullmatch(step.sibling_hash):
         return False
       current = _internal_hash(current, step.sibling_hash)
     elif step.position == "left":
-      if step.sibling_hash is None or not _HEX64_RE.fullmatch(step.sibling_hash):
+      if step.sibling_hash is None or not HEX64_RE.fullmatch(step.sibling_hash):
         return False
       current = _internal_hash(step.sibling_hash, current)
     elif step.position == "promoted":

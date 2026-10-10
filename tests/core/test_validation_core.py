@@ -36,9 +36,6 @@ def _resolve_node_key(node_id: str, at_timestamp: int):
     return _NODE.public_key
   return None
 
-def _issuer_for_build(issuer_id: str):
-  return _resolve_issuer_key(issuer_id, 0)
-
 def _record(seed: int):
   return create_document_record(
     document_hash=sha256_hex(f"document-{seed}".encode()),
@@ -65,7 +62,7 @@ def _signed_block(
     proposer_id=proposer_id,
     algorithm="pow",
     sealed_consensus={"nonce": 0, "difficulty": 1},
-    resolve_issuer_key=_issuer_for_build,
+    resolve_issuer_key=_resolve_issuer_key,
   )
   return attach_proposer_signature(block, (node_key or _NODE).private_key)
 
