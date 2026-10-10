@@ -1,4 +1,5 @@
 """In-memory hash chain: genesis-seeded, atomic check-and-append linking."""
+
 from __future__ import annotations
 
 import threading
@@ -18,8 +19,10 @@ __all__ = [
 class StalePreviousHashError(ValueError):
   """Raised when a candidate's previous_hash no longer matches the current tip."""
 
+
 class NonSequentialIndexError(ValueError):
   """Raised when a candidate's index is not exactly tip.index + 1 (skip or duplicate)."""
+
 
 class InvalidBlockHashError(ValueError):
   """Raised when a candidate's block_hash is not the hash of its own preimage, or it is genesis."""
@@ -64,7 +67,8 @@ class Chain:
         raise InvalidBlockHashError("a second genesis block cannot be appended")
       if sha256_of_canonical(candidate.preimage_dict()) != candidate.block_hash:
         raise InvalidBlockHashError(
-          "candidate.block_hash does not match the hash of its own preimage")
+          "candidate.block_hash does not match the hash of its own preimage"
+        )
       if candidate.previous_hash != tip.block_hash:
         raise StalePreviousHashError(
           f"candidate.previous_hash={candidate.previous_hash!r} does not match "

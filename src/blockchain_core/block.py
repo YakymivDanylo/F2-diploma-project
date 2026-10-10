@@ -1,4 +1,5 @@
 """Candidate block structure: hashed preimage, batch content, and post-hash attestations."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -37,12 +38,14 @@ class InvalidRecordSignatureError(ValueError):
       "failed signature verification",
     )
 
+
 class DuplicateDocumentHashError(ValueError):
   """Raised when the same document_hash appears more than once in a single batch."""
 
   def __init__(self, document_hash: str) -> None:
     self.document_hash = document_hash
     super().__init__(f"duplicate document_hash within batch: {document_hash!r}")
+
 
 class InvalidBlockParametersError(ValueError):
   """Raised when build_candidate_block is given parameters no real block may have."""
@@ -58,6 +61,7 @@ class Block:
   `proposer_signature`, and `commit_signatures` are attestations attached strictly
   after hashing and are themselves never part of the hashed bytes.
   """
+
   # -- hashed preimage --
   index: int
   timestamp: int
@@ -91,6 +95,7 @@ class Block:
       "sealed_consensus": self.sealed_consensus,
     }
 
+
 def _verify_batch_signatures(
   records: Sequence[DocumentRecord],
   timestamp: int,
@@ -101,6 +106,7 @@ def _verify_batch_signatures(
     if issuer_key is None or not verify_document_record(record, issuer_key):
       raise InvalidRecordSignatureError(index, record.document_hash)
 
+
 def _reject_duplicate_document_hashes(records: Sequence[DocumentRecord]) -> None:
   seen: set[str] = set()
   for record in records:
@@ -108,18 +114,24 @@ def _reject_duplicate_document_hashes(records: Sequence[DocumentRecord]) -> None
       raise DuplicateDocumentHashError(record.document_hash)
     seen.add(record.document_hash)
 
+
 def _check_parameters(
-  previous_hash: str, index: int, proposer_id: str, algorithm: str,
+  previous_hash: str,
+  index: int,
+  proposer_id: str,
+  algorithm: str,
 ) -> None:
   if algorithm not in ("pow", "pbft"):
     raise InvalidBlockParametersError(
-      f"algorithm must be 'pow' or 'pbft' ('genesis' is reserved), got {algorithm!r}")
+      f"algorithm must be 'pow' or 'pbft' ('genesis' is reserved), got {algorithm!r}"
+    )
   if type(index) is not int or index < 1:
     raise InvalidBlockParametersError(f"index must be an integer >= 1, got {index!r}")
   if not HEX64_RE.fullmatch(previous_hash):
     raise InvalidBlockParametersError("previous_hash must be 64 lowercase hex characters")
   if not proposer_id:
     raise InvalidBlockParametersError("proposer_id is required")
+
 
 def build_candidate_block(
   records: Sequence[DocumentRecord],
@@ -158,6 +170,7 @@ def build_candidate_block(
     block_hash="",
   )
   return replace(block, block_hash=sha256_of_canonical(block.preimage_dict()))
+
 
 def attach_proposer_signature(block: Block, node_private_key: PrivateKey | KeyPair) -> Block:
   """Sign the block's canonical preimage with the proposer's node key - a post-hash step.

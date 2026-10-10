@@ -20,6 +20,7 @@ def _resolve_issuer_key(issuer_id: str, at_timestamp: int):
     return _ISSUER.public_key
   return None
 
+
 def _record(seed: int):
   return create_document_record(
     document_hash=sha256_hex(f"document-{seed}".encode()),
@@ -28,6 +29,7 @@ def _record(seed: int):
     metadata={"seed": seed},
     issuer_private_key=_ISSUER.private_key,
   )
+
 
 def _candidate(*, previous_hash: str, index: int, timestamp: int = 1_700_000_000_001):
   return build_candidate_block(

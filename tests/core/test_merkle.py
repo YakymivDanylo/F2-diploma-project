@@ -30,6 +30,7 @@ def _record(seed: int):
     issuer_private_key=_ISSUER.private_key,
   )
 
+
 def _naive_duplicating_root(leaves: list[str]) -> str:
   """A naive last-leaf-duplication Merkle build - the CVE-2012-2459-class scheme
   this project's domain-separated, promotion-based construction is built to avoid.
@@ -68,9 +69,13 @@ def test_build_root_promotes_unpaired_node_unchanged():
   records = [_record(0), _record(1), _record(2)]
   leaves = [leaf_hash(r) for r in records]
   expected = sha256_hex(
-    b"\x01" + bytes.fromhex(sha256_hex(
-      b"\x01" + bytes.fromhex(leaves[0]) + bytes.fromhex(leaves[1]),
-    )) + bytes.fromhex(leaves[2]),
+    b"\x01"
+    + bytes.fromhex(
+      sha256_hex(
+        b"\x01" + bytes.fromhex(leaves[0]) + bytes.fromhex(leaves[1]),
+      )
+    )
+    + bytes.fromhex(leaves[2]),
   )
   assert build_root(records) == expected
 
@@ -178,6 +183,7 @@ def test_proof_step_rejects_a_position_sibling_hash_mismatch(position, sibling_h
 def test_proof_step_rejects_an_unknown_position():
   with pytest.raises(ValueError, match="unknown ProofStep position"):
     ProofStep(position="up")
+
 
 def test_verify_proof_fails_instead_of_raising_on_a_malformed_sibling_hash():
   records = [_record(i) for i in range(4)]

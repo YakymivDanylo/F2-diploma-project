@@ -27,6 +27,7 @@ def _resolve_issuer_key(issuer_id: str, at_timestamp: int):
     return _ISSUER.public_key
   return None
 
+
 def _record(seed: int):
   document_hash = sha256_hex(f"document-{seed}".encode())
   return create_document_record(
@@ -36,6 +37,7 @@ def _record(seed: int):
     metadata={"seed": seed},
     issuer_private_key=_ISSUER.private_key,
   )
+
 
 def _build(
   records,
@@ -149,9 +151,14 @@ def test_attach_proposer_signature_produces_a_verifiable_signature_over_the_prei
   attested = attach_proposer_signature(block, node.private_key)
 
   assert attested.proposer_signature is not None
-  assert verify_canonical(
-    node.public_key, attested.preimage_dict(), attested.proposer_signature,
-  ) is True
+  assert (
+    verify_canonical(
+      node.public_key,
+      attested.preimage_dict(),
+      attested.proposer_signature,
+    )
+    is True
+  )
 
 
 def test_attach_proposer_signature_does_not_change_block_hash():

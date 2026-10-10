@@ -9,6 +9,7 @@ The functions are total over hostile input: a malformed or tampered block yields
 failed `ValidationResult`, never an exception. The one deliberate exception is a
 zero-length chain, which is not a validatable input at all.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -109,7 +110,9 @@ def _resolve(resolver: KeyResolver, identity: str, timestamp: int) -> PublicKey 
 
 
 def _signatures_ok(
-  block: Block, resolve_node_key: KeyResolver, resolve_issuer_key: KeyResolver,
+  block: Block,
+  resolve_node_key: KeyResolver,
+  resolve_issuer_key: KeyResolver,
 ) -> bool:
   if not block.proposer_id or not block.proposer_signature:
     return False
@@ -135,7 +138,9 @@ def _structure_ok(block: Block, previous: Block) -> bool:
 
 
 def _check_consensus(
-  block: Block, expected_difficulty: int | None, validator_set: object | None,
+  block: Block,
+  expected_difficulty: int | None,
+  validator_set: object | None,
 ) -> None:
   """Hook for Slice 7 (PoW difficulty / PBFT quorum); reached only if the caller opts in.
 

@@ -3,6 +3,7 @@
 Covers canonical encoding, signature malleability / algorithm policy, key roles,
 DocumentRecord immutability and key-store file safety.
 """
+
 from __future__ import annotations
 
 import copy
@@ -68,9 +69,17 @@ def rsa_pair() -> KeyPair:
 
 # ---------------------------------------------------------------- canonical
 
-@pytest.mark.parametrize("value", [
-  1.5, b"bytes", {1, 2}, Decimal("1.0"), datetime(2024, 1, 1),
-])
+
+@pytest.mark.parametrize(
+  "value",
+  [
+    1.5,
+    b"bytes",
+    {1, 2},
+    Decimal("1.0"),
+    datetime(2024, 1, 1),
+  ],
+)
 def test_canonical_rejects_unsupported_types(value):
   with pytest.raises(CanonicalizationError, match="forbids"):
     canonicalize({"k": value})
@@ -139,8 +148,9 @@ def test_canonical_rejects_non_str_keys_nested_and_in_tuples():
 
 def test_canonical_mapping_proxy_matches_dict():
   data = {"b": [1, 2], "a": {"z": True}}
-  assert canonicalize(MappingProxyType({"b": [1, 2], "a": MappingProxyType({"z": True})})) \
-    == canonicalize(data)
+  assert canonicalize(
+    MappingProxyType({"b": [1, 2], "a": MappingProxyType({"z": True})})
+  ) == canonicalize(data)
 
 
 def test_deep_freeze_is_immutable():
@@ -170,6 +180,7 @@ def test_deep_freeze_does_not_mutate_input():
 
 # ------------------------------------------------------------ vectors guard
 
+
 def test_canonical_vectors_file_is_pinned():
   """The vectors are immutable: other implementations rely on these exact bytes.
 
@@ -181,6 +192,7 @@ def test_canonical_vectors_file_is_pinned():
 
 
 # ------------------------------------------------------------------ signing
+
 
 def test_verify_bytes_rejects_non_canonical_signature_encodings():
   pair = generate_keypair()
@@ -290,8 +302,12 @@ def test_rsa_key_size_policy_on_generation():
 def test_is_acceptable_public_key_matrix(rsa_pair):
   assert is_acceptable_public_key(generate_keypair().public_key) is True
   assert is_acceptable_public_key(rsa_pair.public_key) is True
-  assert is_acceptable_public_key(
-    rsa.generate_private_key(public_exponent=65537, key_size=1024).public_key()) is False
+  assert (
+    is_acceptable_public_key(
+      rsa.generate_private_key(public_exponent=65537, key_size=1024).public_key()
+    )
+    is False
+  )
   assert is_acceptable_public_key(ec.generate_private_key(ec.SECP256K1()).public_key()) is False
   assert is_acceptable_public_key(ed25519.Ed25519PrivateKey.generate().public_key()) is False
   assert is_acceptable_public_key("not a key") is False
@@ -299,6 +315,7 @@ def test_is_acceptable_public_key_matrix(rsa_pair):
 
 
 # --------------------------------------------------------------------- keys
+
 
 def test_issuer_and_node_pairs_are_distinct_key_pair_types():
   issuer = generate_issuer_keypair()
@@ -328,8 +345,14 @@ def test_create_document_record_rejects_node_pair():
 
 def _bare_block() -> Block:
   return Block(
-    index=1, timestamp=1, previous_hash="0" * 64, merkle_root="1" * 64,
-    proposer_id="node", algorithm="pow", sealed_consensus={}, document_records=(),
+    index=1,
+    timestamp=1,
+    previous_hash="0" * 64,
+    merkle_root="1" * 64,
+    proposer_id="node",
+    algorithm="pow",
+    sealed_consensus={},
+    document_records=(),
     block_hash="2" * 64,
   )
 
@@ -358,6 +381,7 @@ def test_issuer_and_node_generators_never_share_key_material(tmp_path):
 
 # ---------------------------------------------------------- document_record
 
+
 def test_uppercase_document_hash_rejected():
   with pytest.raises(InvalidDocumentHashError, match="lowercase hex"):
     create_document_record("A" * 64, "iss", 1, {}, generate_issuer_keypair())
@@ -369,8 +393,9 @@ def test_altering_ipfs_cid_after_signing_fails_verification():
   assert verify_document_record(record, issuer.public_key)
   tampered = dataclasses.replace(record, ipfs_cid="QmTampered")
   assert verify_document_record(tampered, issuer.public_key) is False
-  assert verify_document_record(dataclasses.replace(record, ipfs_cid=None),
-                                issuer.public_key) is False
+  assert (
+    verify_document_record(dataclasses.replace(record, ipfs_cid=None), issuer.public_key) is False
+  )
 
 
 def test_ipfs_cid_none_vs_value_changes_signed_content():
@@ -381,8 +406,12 @@ def test_ipfs_cid_none_vs_value_changes_signed_content():
   assert without.signed_dict() != with_cid.signed_dict()
   assert verify_document_record(without, issuer.public_key)
   assert verify_document_record(with_cid, issuer.public_key)
-  assert verify_document_record(
-    dataclasses.replace(without, signature=with_cid.signature), issuer.public_key) is False
+  assert (
+    verify_document_record(
+      dataclasses.replace(without, signature=with_cid.signature), issuer.public_key
+    )
+    is False
+  )
 
 
 def test_record_metadata_is_detached_from_callers_dict():
@@ -427,6 +456,7 @@ def test_signed_dict_is_unsigned_dict_plus_signature():
 
 
 # ---------------------------------------------------------------- key_store
+
 
 def test_save_without_force_keeps_existing_file_untouched(tmp_path):
   path = tmp_path / "k.pem"

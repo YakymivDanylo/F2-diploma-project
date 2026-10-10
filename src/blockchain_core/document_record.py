@@ -1,4 +1,5 @@
 """Signed document records - the unit anchored into a block's Merkle tree."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -13,6 +14,7 @@ from .signing import sign_canonical, verify_canonical
 
 class InvalidDocumentHashError(ValueError):
   """Raised when document_hash is not a well-formed 64-char lowercase-hex SHA-256 digest."""
+
 
 class MissingDocumentFieldError(ValueError):
   """Raised when a required DocumentRecord field is missing or empty."""
@@ -49,7 +51,9 @@ class DocumentRecord:
 def _validate_hash(document_hash: str) -> None:
   if not HEX64_RE.fullmatch(document_hash):
     raise InvalidDocumentHashError(
-      f"document_hash must be 64 lowercase hex characters, got {document_hash!r}")
+      f"document_hash must be 64 lowercase hex characters, got {document_hash!r}"
+    )
+
 
 def create_document_record(
   document_hash: str | bytes,
@@ -88,6 +92,7 @@ def create_document_record(
   )
   signature = sign_canonical(signing_key, record.unsigned_dict())
   return replace(record, signature=signature)
+
 
 def verify_document_record(record: DocumentRecord, issuer_public_key: PublicKey) -> bool:
   """Verify a DocumentRecord's signature against the issuer's public key."""

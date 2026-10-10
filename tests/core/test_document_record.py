@@ -46,10 +46,19 @@ def test_create_document_record_from_raw_bytes_hashes_internally():
 def test_create_document_record_stores_optional_ipfs_cid():
   issuer = generate_keypair()
   with_cid = create_document_record(
-    VALID_HASH, "issuer-1", 1, {}, issuer.private_key, ipfs_cid="Qm123",
+    VALID_HASH,
+    "issuer-1",
+    1,
+    {},
+    issuer.private_key,
+    ipfs_cid="Qm123",
   )
   without_cid = create_document_record(
-    VALID_HASH, "issuer-1", 1, {}, issuer.private_key,
+    VALID_HASH,
+    "issuer-1",
+    1,
+    {},
+    issuer.private_key,
   )
   assert with_cid.ipfs_cid == "Qm123"
   assert without_cid.ipfs_cid is None

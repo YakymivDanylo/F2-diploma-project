@@ -1,4 +1,5 @@
 """Deterministic genesis block - fixed constants, byte-identical on every node."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -19,6 +20,7 @@ case for genesis only, never produced via the normal block-build flow).
 
 GENESIS_PREVIOUS_HASH = "0" * 64
 
+
 def _genesis_preimage() -> dict[str, Any]:
   return {
     "index": 0,
@@ -30,9 +32,11 @@ def _genesis_preimage() -> dict[str, Any]:
     "sealed_consensus": {},
   }
 
+
 GENESIS_BLOCK_HASH = sha256_of_canonical(_genesis_preimage())
 """Deterministic function of the fixed constants above - identical on every node,
 every process start, with no network communication required (closes C-1)."""
+
 
 def build_genesis_block() -> Block:
   """The single, network-wide genesis block: no proposer, no attestation, no batch."""

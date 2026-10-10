@@ -7,6 +7,7 @@ crash never leaves a truncated key and a symlink planted at the target is never 
 On Windows the POSIX mode bits do not restrict who can read a file: protect the key
 directory with an ACL instead. Private keys are stored unencrypted (PEM, no passphrase).
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -26,8 +27,10 @@ from ..keys import (
 class KeyStoreExistsError(FileExistsError):
   """Raised when save_key_pair targets a path that already holds a key, without force=True."""
 
+
 class KeyStoreMissingError(FileNotFoundError):
   """Raised when load_key_pair targets a path with no private-key file present."""
+
 
 class KeyStoreCorruptedError(ValueError):
   """Raised when a key-store file exists but cannot be parsed as a valid private key."""
@@ -50,10 +53,12 @@ def _write_file(path: Path, data: bytes, mode: int, *, force: bool) -> None:
         os.link(temp, path)
       except FileExistsError as exc:
         raise KeyStoreExistsError(
-          f"key store already exists at {path}; pass force=True to overwrite") from exc
+          f"key store already exists at {path}; pass force=True to overwrite"
+        ) from exc
   finally:
     with contextlib.suppress(FileNotFoundError):
       os.unlink(temp)
+
 
 def save_key_pair(key_pair: KeyPair, path: str | Path, *, force: bool = False) -> None:
   """Persist a KeyPair's private key (and matching public key) to dedicated files."""
@@ -61,10 +66,12 @@ def save_key_pair(key_pair: KeyPair, path: str | Path, *, force: bool = False) -
   public_path = private_path.with_name(private_path.name + ".pub")
   if not force and (private_path.exists() or public_path.exists()):
     raise KeyStoreExistsError(
-      f"key store already exists at {private_path}; pass force=True to overwrite")
+      f"key store already exists at {private_path}; pass force=True to overwrite"
+    )
   private_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
   _write_file(private_path, private_key_to_pem(key_pair.private_key), 0o600, force=force)
   _write_file(public_path, public_key_to_pem(key_pair.public_key), 0o644, force=force)
+
 
 def load_key_pair(path: str | Path) -> KeyPair:
   """Load a KeyPair from its private-key store file; derives the public key from it."""

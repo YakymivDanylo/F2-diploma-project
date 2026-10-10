@@ -4,6 +4,7 @@ Signatures are lowercase hex, and only one encoding of each signature verifies:
 non-canonical hex (uppercase, whitespace, odd length) and high-S ECDSA values are
 rejected, so a relayer cannot re-encode a signature into a different, still-valid one.
 """
+
 from __future__ import annotations
 
 import re
@@ -38,6 +39,7 @@ def sign_bytes(private_key: PrivateKey, data: bytes) -> str:
     raise UnsupportedAlgorithmError(f"Unsupported private key type: {type(private_key)!r}")
   return signature.hex()
 
+
 def verify_bytes(public_key: PublicKey, data: bytes, signature_hex: str) -> bool:
   """Verify a lowercase-hex signature over raw bytes; never raises on malformed input."""
   if not isinstance(signature_hex, str) or not _SIGNATURE_HEX_RE.fullmatch(signature_hex):
@@ -60,8 +62,10 @@ def verify_bytes(public_key: PublicKey, data: bytes, signature_hex: str) -> bool
     return False
   return True
 
+
 def sign_canonical(private_key: PrivateKey, obj: Any) -> str:
   return sign_bytes(private_key, canonicalize(obj))
+
 
 def verify_canonical(public_key: PublicKey, obj: Any, signature_hex: str) -> bool:
   """Verify over the canonical bytes of `obj`; an un-encodable `obj` is simply invalid."""

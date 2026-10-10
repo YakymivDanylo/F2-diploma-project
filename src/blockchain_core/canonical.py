@@ -5,6 +5,7 @@ a JSON array), and `dict`/read-only mappings with `str` keys. Anything else - fl
 sets, lone surrogates, oversized ints, over-deep nesting - raises `CanonicalizationError`,
 never a bare `TypeError`/`ValueError`, so callers can fail closed on hostile input.
 """
+
 from __future__ import annotations
 
 import json
@@ -31,7 +32,8 @@ def _validate(value: Any, depth: int = 0) -> Any:
     return value
   if isinstance(value, float):
     raise CanonicalizationError(
-      "canonical encoding forbids float values: use integer epoch-ms for timestamps")
+      "canonical encoding forbids float values: use integer epoch-ms for timestamps"
+    )
   if isinstance(value, str):
     try:
       value.encode("utf-8")
@@ -48,8 +50,7 @@ def _validate(value: Any, depth: int = 0) -> Any:
     return normalized
   if isinstance(value, list | tuple):
     return [_validate(item, depth + 1) for item in value]
-  raise CanonicalizationError(
-    f"canonical encoding forbids values of type {type(value).__name__}")
+  raise CanonicalizationError(f"canonical encoding forbids values of type {type(value).__name__}")
 
 
 def canonicalize(obj: Any) -> bytes:

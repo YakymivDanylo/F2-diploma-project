@@ -1,4 +1,5 @@
 """Hardening tests: genesis pinning, validation totality, extension, chain races, block params."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -60,12 +61,14 @@ _STEP = 1_000
 def _resolve_issuer_key(issuer_id: str, at_timestamp: int):
   return _ISSUER.public_key if issuer_id == _ISSUER_ID else None
 
+
 def _resolve_node_key(node_id: str, at_timestamp: int):
   if node_id == _NODE_ID:
     return _NODE.public_key
   if node_id == _NODE2_ID:
     return _NODE2.public_key
   return None
+
 
 def _record(seed: int, *, document_hash: str | None = None, key=None):
   return create_document_record(
@@ -76,9 +79,17 @@ def _record(seed: int, *, document_hash: str | None = None, key=None):
     issuer_private_key=(key or _ISSUER).private_key,
   )
 
+
 def _signed_block(
-  *, previous_hash, index, timestamp, seed, node_key=None, proposer_id=_NODE_ID,
-  records=None, algorithm="pow",
+  *,
+  previous_hash,
+  index,
+  timestamp,
+  seed,
+  node_key=None,
+  proposer_id=_NODE_ID,
+  records=None,
+  algorithm="pow",
 ) -> Block:
   block = build_candidate_block(
     records or [_record(seed)],
@@ -92,35 +103,45 @@ def _signed_block(
   )
   return attach_proposer_signature(block, (node_key or _NODE).private_key)
 
+
 def _valid_chain(length: int) -> list[Block]:
   blocks = [build_genesis_block()]
   for i in range(1, length + 1):
-    blocks.append(_signed_block(
-      previous_hash=blocks[-1].block_hash, index=i, timestamp=_BASE_TS + i * _STEP, seed=i))
+    blocks.append(
+      _signed_block(
+        previous_hash=blocks[-1].block_hash, index=i, timestamp=_BASE_TS + i * _STEP, seed=i
+      )
+    )
   return blocks
+
 
 def _validate(blocks, **overrides):
   kwargs = {"resolve_node_key": _resolve_node_key, "resolve_issuer_key": _resolve_issuer_key}
   kwargs.update(overrides)
   return validate_chain(blocks, **kwargs)
 
+
 def _extend(tip, blocks, **overrides):
   kwargs = {"resolve_node_key": _resolve_node_key, "resolve_issuer_key": _resolve_issuer_key}
   kwargs.update(overrides)
   return validate_extension(tip, blocks, **kwargs)
 
+
 def _rehash(block: Block, **changes) -> Block:
   changed = replace(block, **changes)
   return replace(changed, block_hash=sha256_of_canonical(changed.preimage_dict()))
+
 
 def _reseal_with_records(block: Block, records, key=None) -> Block:
   rebuilt = _rehash(block, document_records=tuple(records), merkle_root=build_root(records))
   return attach_proposer_signature(rebuilt, (key or _NODE).private_key)
 
+
 def _replace_at(blocks, position, new_block):
   result = list(blocks)
   result[position] = new_block
   return result
+
 
 def _assert_invalid(result, index, failure_type):
   assert result.valid is False
@@ -130,9 +151,11 @@ def _assert_invalid(result, index, failure_type):
 
 # ---------------------------------------------------------------- GENESIS
 
+
 def test_genesis_block_hash_is_pinned_literal():
   """Changing any genesis constant is a breaking network change: every node must agree."""
   assert GENESIS_BLOCK_HASH == "45d36937b17fce502b979f6835e619bef367436b941d58b7e8e9c80d2b070c8a"
+
 
 @pytest.mark.parametrize("seed", ["0", "1", "12345"])
 def test_genesis_hash_is_independent_of_hash_seed(seed):
@@ -140,10 +163,16 @@ def test_genesis_hash_is_independent_of_hash_seed(seed):
   code = "from blockchain_core import GENESIS_BLOCK_HASH; print(GENESIS_BLOCK_HASH)"
   completed = subprocess.run(
     [sys.executable, "-c", code],
-    cwd=_REPO_ROOT, env=env, capture_output=True, text=True, check=True, timeout=60,
+    cwd=_REPO_ROOT,
+    env=env,
+    capture_output=True,
+    text=True,
+    check=True,
+    timeout=60,
   )
 
   assert completed.stdout.strip() == GENESIS_BLOCK_HASH
+
 
 def test_genesis_with_altered_timestamp_constant_fails_hash_at_zero():
   assert genesis_module.GENESIS_TIMESTAMP_MS == build_genesis_block().timestamp
@@ -152,6 +181,7 @@ def test_genesis_with_altered_timestamp_constant_fails_hash_at_zero():
   forged = replace(forged, block_hash=sha256_of_canonical(forged.preimage_dict()))
 
   _assert_invalid(_validate([forged]), 0, "hash")
+
 
 @pytest.mark.parametrize("field", ["document_records", "proposer_signature", "commit_signatures"])
 def test_genesis_with_extra_fields_fails_hash_at_zero(field):
@@ -164,9 +194,11 @@ def test_genesis_with_extra_fields_fails_hash_at_zero(field):
 
   _assert_invalid(_validate([forged]), 0, "hash")
 
+
 def test_non_block_genesis_is_rejected_without_exception():
   _assert_invalid(_validate(["not a block"]), 0, "hash")
   _assert_invalid(_validate([None]), 0, "hash")
+
 
 def test_non_block_later_element_is_structural():
   blocks = _valid_chain(2)
@@ -177,14 +209,19 @@ def test_non_block_later_element_is_structural():
 
 # ---------------------------------------------------------------- VALIDATION: hostile input
 
-@pytest.mark.parametrize("change", [
-  {"timestamp": "x"},
-  {"index": "1"},
-  {"previous_hash": None},
-  {"proposer_id": 123},
-  {"merkle_root": 5},
-  {"block_hash": None},
-], ids=["timestamp", "index", "previous_hash", "proposer_id", "merkle_root", "block_hash"])
+
+@pytest.mark.parametrize(
+  "change",
+  [
+    {"timestamp": "x"},
+    {"index": "1"},
+    {"previous_hash": None},
+    {"proposer_id": 123},
+    {"merkle_root": 5},
+    {"block_hash": None},
+  ],
+  ids=["timestamp", "index", "previous_hash", "proposer_id", "merkle_root", "block_hash"],
+)
 def test_wrong_field_types_are_structural_and_never_raise(change):
   blocks = _valid_chain(2)
   tampered = replace(blocks[1], **change)
@@ -194,11 +231,13 @@ def test_wrong_field_types_are_structural_and_never_raise(change):
   assert isinstance(result, ValidationResult)
   _assert_invalid(result, 1, "structural")
 
+
 def test_document_records_as_list_is_structural():
   blocks = _valid_chain(2)
   tampered = replace(blocks[1], document_records=list(blocks[1].document_records))
 
   _assert_invalid(_validate(_replace_at(blocks, 1, tampered)), 1, "structural")
+
 
 def test_document_records_with_non_record_is_structural():
   blocks = _valid_chain(2)
@@ -206,11 +245,13 @@ def test_document_records_with_non_record_is_structural():
 
   _assert_invalid(_validate(_replace_at(blocks, 1, tampered)), 1, "structural")
 
+
 def test_sealed_consensus_replaced_by_list_is_structural():
   blocks = _valid_chain(2)
   tampered = replace(blocks[1], sealed_consensus=[1, 2])
 
   _assert_invalid(_validate(_replace_at(blocks, 1, tampered)), 1, "structural")
+
 
 def test_uncanonicalizable_record_metadata_returns_result_not_exception():
   blocks = _valid_chain(2)
@@ -223,6 +264,7 @@ def test_uncanonicalizable_record_metadata_returns_result_not_exception():
   # hash/link pass (records are not in the preimage); the Merkle leaf cannot be encoded.
   _assert_invalid(result, 1, "merkle")
 
+
 def test_uncanonicalizable_sealed_consensus_is_hash_failure():
   blocks = _valid_chain(2)
   tampered = replace(blocks[1], sealed_consensus={"x": 1.5})
@@ -230,17 +272,20 @@ def test_uncanonicalizable_sealed_consensus_is_hash_failure():
   # preimage cannot be canonicalized -> recompute is None -> "hash", not an exception.
   _assert_invalid(_validate(_replace_at(blocks, 1, tampered)), 1, "hash")
 
+
 def test_raising_node_resolver_is_signature_failure():
   def boom(identity, at_timestamp):
     raise RuntimeError("registry down")
 
   _assert_invalid(_validate(_valid_chain(2), resolve_node_key=boom), 1, "signature")
 
+
 def test_raising_issuer_resolver_is_signature_failure():
   def boom(identity, at_timestamp):
     raise RuntimeError("registry down")
 
   _assert_invalid(_validate(_valid_chain(2), resolve_issuer_key=boom), 1, "signature")
+
 
 @pytest.mark.parametrize("algorithm", ["foo", "POW"])
 def test_unknown_algorithm_is_structural(algorithm):
@@ -249,42 +294,56 @@ def test_unknown_algorithm_is_structural(algorithm):
 
   _assert_invalid(_validate(_replace_at(blocks, 1, tampered)), 1, "structural")
 
+
 def test_genesis_algorithm_at_non_zero_position_is_structural():
   blocks = _valid_chain(2)
   tampered = _rehash(blocks[2], algorithm="genesis")
 
   _assert_invalid(_validate(_replace_at(blocks, 2, tampered)), 2, "structural")
 
+
 @pytest.mark.parametrize("bad_position", [1, 2], ids=["second_record", "third_record"])
 def test_corrupt_signature_of_second_or_third_record_is_signature_failure(bad_position):
   blocks = _valid_chain(1)
   records = [_record(10), _record(11), _record(12)]
   multi = _signed_block(
-    previous_hash=blocks[1].block_hash, index=2, timestamp=_BASE_TS + 2 * _STEP,
-    seed=0, records=records)
+    previous_hash=blocks[1].block_hash,
+    index=2,
+    timestamp=_BASE_TS + 2 * _STEP,
+    seed=0,
+    records=records,
+  )
   corrupted = list(records)
   corrupted[bad_position] = _record(10 + bad_position, key=_OTHER)
   resealed = _reseal_with_records(multi, corrupted)
 
   _assert_invalid(_validate([*blocks, resealed]), 2, "signature")
 
+
 def test_valid_multi_record_block_validates():
   blocks = _valid_chain(1)
   multi = _signed_block(
-    previous_hash=blocks[1].block_hash, index=2, timestamp=_BASE_TS + 2 * _STEP,
-    seed=0, records=[_record(10), _record(11), _record(12)])
+    previous_hash=blocks[1].block_hash,
+    index=2,
+    timestamp=_BASE_TS + 2 * _STEP,
+    seed=0,
+    records=[_record(10), _record(11), _record(12)],
+  )
 
   assert _validate([*blocks, multi]).valid is True
+
 
 def test_duplicate_document_hash_inside_block_is_structural():
   blocks = _valid_chain(1)
   first = _record(10)
   dup = _record(99, document_hash=first.document_hash)
   base = _signed_block(
-    previous_hash=blocks[1].block_hash, index=2, timestamp=_BASE_TS + 2 * _STEP, seed=10)
+    previous_hash=blocks[1].block_hash, index=2, timestamp=_BASE_TS + 2 * _STEP, seed=10
+  )
   resealed = _reseal_with_records(base, [first, dup])
 
   _assert_invalid(_validate([*blocks, resealed]), 2, "structural")
+
 
 def test_resolvers_receive_block_timestamp_and_proposer():
   node_calls, issuer_calls = [], []
@@ -304,6 +363,7 @@ def test_resolvers_receive_block_timestamp_and_proposer():
   assert node_calls == [(_NODE_ID, b.timestamp) for b in blocks[1:]]
   assert issuer_calls == [(_ISSUER_ID, b.timestamp) for b in blocks[1:]]
 
+
 def test_rotation_boundary_resolves_per_resolver_rule():
   rotation = _BASE_TS + 2 * _STEP
   new_node = generate_keypair()
@@ -315,13 +375,15 @@ def test_rotation_boundary_resolves_per_resolver_rule():
 
   blocks = _valid_chain(1)
   at_boundary = _signed_block(
-    previous_hash=blocks[1].block_hash, index=2, timestamp=rotation, seed=2, node_key=new_node)
+    previous_hash=blocks[1].block_hash, index=2, timestamp=rotation, seed=2, node_key=new_node
+  )
   before = _signed_block(
-    previous_hash=blocks[1].block_hash, index=2, timestamp=rotation - 1, seed=2,
-    node_key=new_node)
+    previous_hash=blocks[1].block_hash, index=2, timestamp=rotation - 1, seed=2, node_key=new_node
+  )
 
   assert _validate([*blocks, at_boundary], resolve_node_key=node_resolver).valid is True
   _assert_invalid(_validate([*blocks, before], resolve_node_key=node_resolver), 2, "signature")
+
 
 def test_wrong_previous_hash_and_bad_signature_reports_link():
   blocks = _valid_chain(2)
@@ -330,11 +392,13 @@ def test_wrong_previous_hash_and_bad_signature_reports_link():
 
   _assert_invalid(_validate(_replace_at(blocks, 2, tampered)), 2, "link")
 
+
 def test_self_consistent_merkle_change_reports_merkle_before_signature():
   blocks = _valid_chain(2)
   tampered = _rehash(blocks[2], merkle_root=sha256_hex(b"other root"))
 
   _assert_invalid(_validate(_replace_at(blocks, 2, tampered)), 2, "merkle")
+
 
 @pytest.mark.parametrize("position", [3, 2], ids=["tip", "middle"])
 def test_tampered_index_with_recomputed_hash_is_signature_failure(position):
@@ -347,6 +411,7 @@ def test_tampered_index_with_recomputed_hash_is_signature_failure(position):
   # `index`) is checked before the index/structure check -> "signature" at that position.
   _assert_invalid(result, position, "signature")
 
+
 @pytest.mark.parametrize("position", [3, 2], ids=["tip", "middle"])
 def test_tampered_previous_hash_with_recomputed_hash_is_link_failure(position):
   blocks = _valid_chain(3)
@@ -355,26 +420,35 @@ def test_tampered_previous_hash_with_recomputed_hash_is_link_failure(position):
   # link is checked before signature, so the stale signature is not what is reported.
   _assert_invalid(_validate(_replace_at(blocks, position, tampered)), position, "link")
 
+
 def test_proposer_repointed_to_another_known_node_is_signature_failure():
   blocks = _valid_chain(2)
   tampered = _rehash(blocks[2], proposer_id=_NODE2_ID)
 
   _assert_invalid(_validate(_replace_at(blocks, 2, tampered)), 2, "signature")
 
+
 def test_block_resigned_with_unregistered_attacker_key_is_signature_failure():
   blocks = _valid_chain(1)
   forged = _signed_block(
-    previous_hash=blocks[1].block_hash, index=2, timestamp=_BASE_TS + 2 * _STEP, seed=2,
-    node_key=_OTHER)
+    previous_hash=blocks[1].block_hash,
+    index=2,
+    timestamp=_BASE_TS + 2 * _STEP,
+    seed=2,
+    node_key=_OTHER,
+  )
 
   _assert_invalid(_validate([*blocks, forged]), 2, "signature")
+
 
 def test_first_block_before_genesis_timestamp_is_structural():
   genesis = build_genesis_block()
   early = _signed_block(
-    previous_hash=genesis.block_hash, index=1, timestamp=genesis.timestamp - 1, seed=1)
+    previous_hash=genesis.block_hash, index=1, timestamp=genesis.timestamp - 1, seed=1
+  )
 
   _assert_invalid(_validate([genesis, early]), 1, "structural")
+
 
 def test_validation_result_invariant_and_frozen():
   with pytest.raises(ValueError, match="valid iff"):
@@ -387,6 +461,7 @@ def test_validation_result_invariant_and_frozen():
 
 # ---------------------------------------------------------------- validate_extension
 
+
 def test_extension_of_valid_chain_matches_full_validation():
   chain = _valid_chain(5)
 
@@ -395,8 +470,10 @@ def test_extension_of_valid_chain_matches_full_validation():
   assert extension.valid is True
   assert extension == _validate(chain)
 
+
 def test_extension_with_no_new_blocks_is_valid():
   assert _extend(_valid_chain(2)[-1], []).valid is True
+
 
 @pytest.mark.parametrize("kind", ["signature", "hash", "link", "structural"])
 def test_tampered_new_block_matches_full_chain_result(kind):
@@ -422,6 +499,7 @@ def test_tampered_new_block_matches_full_chain_result(kind):
   assert extension == full
   assert extension.first_invalid_index == 4
 
+
 def test_extension_rejects_block_linking_to_different_tip():
   chain = _valid_chain(4)
 
@@ -431,6 +509,7 @@ def test_extension_rejects_block_linking_to_different_tip():
 
 
 # ---------------------------------------------------------------- PERFORMANCE (call counting)
+
 
 @pytest.mark.parametrize("length", [100, 200])
 def test_validation_hashes_each_block_exactly_once(monkeypatch, length):
@@ -452,6 +531,7 @@ def test_validation_hashes_each_block_exactly_once(monkeypatch, length):
 
 # ---------------------------------------------------------------- CHAIN
 
+
 def test_append_rejects_candidate_with_wrong_block_hash():
   chain = Chain()
   good = _signed_block(previous_hash=chain.tip.block_hash, index=1, timestamp=_BASE_TS, seed=1)
@@ -460,23 +540,27 @@ def test_append_rejects_candidate_with_wrong_block_hash():
     chain.append(replace(good, block_hash=sha256_hex(b"wrong")))
   assert len(chain) == 1
 
+
 def test_append_rejects_second_genesis():
   chain = Chain()
 
   with pytest.raises(InvalidBlockHashError, match="genesis"):
     chain.append(build_genesis_block())
 
+
 def test_blocks_is_tuple_snapshot_unaffected_by_later_appends():
   chain = Chain()
   snapshot = chain.blocks
   chain.append(
-    _signed_block(previous_hash=chain.tip.block_hash, index=1, timestamp=_BASE_TS, seed=1))
+    _signed_block(previous_hash=chain.tip.block_hash, index=1, timestamp=_BASE_TS, seed=1)
+  )
 
   assert isinstance(snapshot, tuple)
   assert len(snapshot) == 1
   assert len(chain) == 2
   assert chain.blocks[-1] is chain.tip
   assert len(chain.blocks) == len(chain)
+
 
 def _race(candidates: list[Block], chain: Chain) -> tuple[int, list[BaseException]]:
   barrier = threading.Barrier(len(candidates))
@@ -502,6 +586,7 @@ def _race(candidates: list[Block], chain: Chain) -> tuple[int, list[BaseExceptio
     thread.join(timeout=30)
   return len(successes), errors
 
+
 def _candidates(chain: Chain, count: int, start_seed: int) -> list[Block]:
   tip = chain.tip
   return [
@@ -517,6 +602,7 @@ def _candidates(chain: Chain, count: int, start_seed: int) -> list[Block]:
     )
     for i in range(count)
   ]
+
 
 def test_concurrent_append_race_has_exactly_one_winner_per_round():
   chain = Chain()
@@ -536,8 +622,10 @@ def test_concurrent_append_race_has_exactly_one_winner_per_round():
   finally:
     sys.setswitchinterval(previous_interval)
 
+
 def test_widened_check_append_gap_still_has_exactly_one_winner(monkeypatch):
   """Fails without the lock: slow hashing/comparison widens the check-then-append window."""
+
   class SlowStr(str):
     def __ne__(self, other):
       result = str.__ne__(self, other)
@@ -568,6 +656,7 @@ def test_widened_check_append_gap_still_has_exactly_one_winner(monkeypatch):
 
 # ---------------------------------------------------------------- BLOCK
 
+
 def _build(**overrides):
   kwargs = {
     "previous_hash": GENESIS_BLOCK_HASH,
@@ -581,21 +670,36 @@ def _build(**overrides):
   kwargs.update(overrides)
   return build_candidate_block([_record(1)], **kwargs)
 
-@pytest.mark.parametrize("override", [
-  {"algorithm": "genesis"},
-  {"algorithm": "foo"},
-  {"index": 0},
-  {"index": -1},
-  {"index": True},
-  {"index": "1"},
-  {"previous_hash": "A" * 64},
-  {"previous_hash": "ab" * 16},
-  {"proposer_id": ""},
-], ids=["genesis", "unknown_algo", "idx0", "idx_neg", "idx_bool", "idx_str",
-        "upper_hash", "short_hash", "empty_proposer"])
+
+@pytest.mark.parametrize(
+  "override",
+  [
+    {"algorithm": "genesis"},
+    {"algorithm": "foo"},
+    {"index": 0},
+    {"index": -1},
+    {"index": True},
+    {"index": "1"},
+    {"previous_hash": "A" * 64},
+    {"previous_hash": "ab" * 16},
+    {"proposer_id": ""},
+  ],
+  ids=[
+    "genesis",
+    "unknown_algo",
+    "idx0",
+    "idx_neg",
+    "idx_bool",
+    "idx_str",
+    "upper_hash",
+    "short_hash",
+    "empty_proposer",
+  ],
+)
 def test_build_rejects_invalid_parameters(override):
   with pytest.raises(InvalidBlockParametersError):
     _build(**override)
+
 
 def test_sealed_consensus_is_detached_from_callers_dict():
   sealed = {"nonce": 1, "nested": {"k": [1, 2]}}
@@ -608,6 +712,7 @@ def test_sealed_consensus_is_detached_from_callers_dict():
   assert block.sealed_consensus["nonce"] == 1
   assert sha256_of_canonical(block.preimage_dict()) == original_hash
 
+
 def test_sealed_consensus_is_read_only_and_deeply_frozen():
   block = _build(sealed_consensus={"nonce": 1, "nested": {"k": [1, 2]}})
 
@@ -617,6 +722,7 @@ def test_sealed_consensus_is_read_only_and_deeply_frozen():
     block.sealed_consensus["nested"]["y"] = 1
   assert isinstance(block.sealed_consensus["nested"]["k"], tuple)
 
+
 def test_block_equality_independent_of_dict_or_frozen_sealed_consensus():
   base = _build()
   from_dict = replace(base, sealed_consensus={"nonce": 0})
@@ -624,10 +730,12 @@ def test_block_equality_independent_of_dict_or_frozen_sealed_consensus():
 
   assert from_dict == from_frozen == base
 
+
 def test_preimage_dict_hash_equals_block_hash():
   block = _build()
 
   assert sha256_of_canonical(block.preimage_dict()) == block.block_hash
+
 
 def test_batch_with_duplicate_and_bad_signature_reports_signature_first():
   good = _record(1)
@@ -635,19 +743,33 @@ def test_batch_with_duplicate_and_bad_signature_reports_signature_first():
 
   with pytest.raises(InvalidRecordSignatureError) as excinfo:
     build_candidate_block(
-      [good, bad_dup], previous_hash=GENESIS_BLOCK_HASH, index=1, timestamp=_BASE_TS,
-      proposer_id=_NODE_ID, algorithm="pow", sealed_consensus={},
-      resolve_issuer_key=_resolve_issuer_key)
+      [good, bad_dup],
+      previous_hash=GENESIS_BLOCK_HASH,
+      index=1,
+      timestamp=_BASE_TS,
+      proposer_id=_NODE_ID,
+      algorithm="pow",
+      sealed_consensus={},
+      resolve_issuer_key=_resolve_issuer_key,
+    )
   assert excinfo.value.index == 1
+
 
 def test_batch_with_only_duplicate_raises_duplicate_error():
   good = _record(1)
 
   with pytest.raises(DuplicateDocumentHashError, match="duplicate document_hash"):
     build_candidate_block(
-      [good, good], previous_hash=GENESIS_BLOCK_HASH, index=1, timestamp=_BASE_TS,
-      proposer_id=_NODE_ID, algorithm="pow", sealed_consensus={},
-      resolve_issuer_key=_resolve_issuer_key)
+      [good, good],
+      previous_hash=GENESIS_BLOCK_HASH,
+      index=1,
+      timestamp=_BASE_TS,
+      proposer_id=_NODE_ID,
+      algorithm="pow",
+      sealed_consensus={},
+      resolve_issuer_key=_resolve_issuer_key,
+    )
+
 
 def test_build_invokes_issuer_resolver_with_issuer_and_timestamp():
   calls = []
@@ -663,23 +785,33 @@ def test_build_invokes_issuer_resolver_with_issuer_and_timestamp():
 
 # ---------------------------------------------------------------- PACKAGE
 
+
 def test_every_name_in_all_is_importable():
   missing = [name for name in blockchain_core.__all__ if not hasattr(blockchain_core, name)]
 
   assert missing == []
 
+
 def test_all_contains_public_api():
   expected = {
-    "validate_chain", "validate_extension", "Chain", "Block", "build_candidate_block",
-    "GENESIS_BLOCK_HASH", "IssuerKeyPair", "NodeKeyPair",
+    "validate_chain",
+    "validate_extension",
+    "Chain",
+    "Block",
+    "build_candidate_block",
+    "GENESIS_BLOCK_HASH",
+    "IssuerKeyPair",
+    "NodeKeyPair",
   }
 
   assert expected <= set(blockchain_core.__all__)
 
+
 def test_core_package_never_imports_node_layer():
   pattern = re.compile(r"^\s*(from\s+(src\.)?node\b|import\s+(src\.)?node\b)", re.MULTILINE)
   offenders = [
-    str(path) for path in (_SRC_DIR / "blockchain_core").rglob("*.py")
+    str(path)
+    for path in (_SRC_DIR / "blockchain_core").rglob("*.py")
     if pattern.search(path.read_text(encoding="utf-8"))
   ]
 

@@ -15,6 +15,7 @@ _INTERNAL_PREFIX = b"\x01"
 class EmptyBatchError(ValueError):
   """Raised when a Merkle root/proof is requested over zero document records."""
 
+
 class DocumentHashNotFoundError(ValueError):
   """Raised when a proof is requested for a document_hash absent from the batch."""
 
@@ -28,6 +29,7 @@ class ProofStep:
   combine; "promoted" means the node had no sibling at this level (an odd
   count) and passes to the next level unchanged.
   """
+
   position: Literal["left", "right", "promoted"]
   sibling_hash: str | None = None
 
@@ -53,9 +55,11 @@ def leaf_hash(record: DocumentRecord) -> str:
   """
   return sha256_hex(_LEAF_PREFIX + canonicalize(record.signed_dict()))
 
+
 def _internal_hash(left: str, right: str) -> str:
   """Domain-separated internal-node hash: H(0x01 || left_hash || right_hash)."""
   return sha256_hex(_INTERNAL_PREFIX + bytes.fromhex(left) + bytes.fromhex(right))
+
 
 def _build_tree_levels(leaves: list[str]) -> list[list[str]]:
   """All levels bottom-up, leaves first and the single-element root list last.
@@ -81,11 +85,13 @@ def _build_tree_levels(leaves: list[str]) -> list[list[str]]:
     current = next_level
   return levels
 
+
 def _find_index(records: Sequence[DocumentRecord], document_hash: str) -> int:
   for index, record in enumerate(records):
     if record.document_hash == document_hash:
       return index
   raise DocumentHashNotFoundError(f"document_hash {document_hash!r} not found in batch")
+
 
 def build_root(records: Sequence[DocumentRecord]) -> str:
   """Merkle root over `records`. N=1 degenerates to that record's leaf hash."""
@@ -94,6 +100,7 @@ def build_root(records: Sequence[DocumentRecord]) -> str:
   leaves = [leaf_hash(record) for record in records]
   levels = _build_tree_levels(leaves)
   return levels[-1][0]
+
 
 def build_proof(records: Sequence[DocumentRecord], document_hash: str) -> list[ProofStep]:
   """Sibling path from `document_hash`'s leaf up to the root. Empty for N=1."""
@@ -115,6 +122,7 @@ def build_proof(records: Sequence[DocumentRecord], document_hash: str) -> list[P
       path.append(ProofStep(position="left", sibling_hash=level[index - 1]))
     index //= 2
   return path
+
 
 def _verify_leaf_hash(current: str, proof: Sequence[ProofStep], claimed_root: str) -> bool:
   """Shared verification core. Never raises on malformed input - returns False instead,
@@ -138,9 +146,11 @@ def _verify_leaf_hash(current: str, proof: Sequence[ProofStep], claimed_root: st
       return False
   return current == claimed_root
 
+
 def verify_proof(record: DocumentRecord, proof: Sequence[ProofStep], claimed_root: str) -> bool:
   """Verify that `record` is included under `claimed_root`, given its inclusion proof."""
   return _verify_leaf_hash(leaf_hash(record), proof, claimed_root)
+
 
 def verify_leaf_hash_proof(leaf: str, proof: Sequence[ProofStep], claimed_root: str) -> bool:
   """Verify an inclusion proof using only an already-computed leaf hash (UC-5-A) -
