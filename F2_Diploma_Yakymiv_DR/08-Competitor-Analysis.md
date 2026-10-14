@@ -60,14 +60,14 @@
 
 Таблиця 1.1 – Порівняльна матриця аналогів та проєкту за інженерними критеріями
 
-| Критерій | Blockcerts | OpenCerts | Hyperledger Indy/Aries | Проєкт (власний блокчейн) |
-|---|---|---|---|---|
-| Тип архітектури | Off-chain issuance + anchoring у публічному ланцюгу | Клієнтська верифікація + smart contract | Permissioned ledger + мережа агентів | P2P-мережа вузлів із власним ledger |
-| API / протоколи | JSON-LD (W3C VC), Merkle proof, RPC вузла Bitcoin/Ethereum | JSON, JSON-RPC (Web3), DNS TXT | DIDComm (HTTP/WebSocket), ZeroMQ, REST (агент) | REST, WebSocket |
-| СУБД / сховище | Відсутня; Merkle root у ланцюгу | Storage смарт-контракту | RocksDB (ledger), SQLite/PostgreSQL (wallet) | JSON-файловий chain store з інтерфейсом, що допускає SQLite-backend; окремі сховища ключів емітента та вузла |
-| Консенсус / Fault Tolerance | Bitcoin PoW / Ethereum PoS (зовнішній) | Ethereum PoS (зовнішній) | RBFT (3f+1) | PoW та PBFT, порівняльне дослідження |
-| Latency фіналізації | ≈ десятки хвилин (Bitcoin) | ≈ 12,8 хв (finality Ethereum, нормальні умови) | ≈ 1–16 с (запис; 4–8 вузлів; лабораторні дані Baniata та ін., 2022) | PoW: регулюється параметром difficulty; PBFT: детермінована фіналізація після commit-фази (3f + 1). Кількісні значення — за результатами Розділу 4 |
-| Безпека / модель довіри | Хеш + ключ емітента за HTTPS | Хеш + DNS TXT / DID | AnonCreds, ZKP, DID | SHA-256, Merkle, ECDSA/RSA (`cryptography`) |
+| Критерій                    | Blockcerts                                                 | OpenCerts                                      | Hyperledger Indy/Aries                                              | Проєкт (власний блокчейн)                                                                                                                          |
+| --------------------------- | ---------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Тип архітектури             | Off-chain issuance + anchoring у публічному ланцюгу        | Клієнтська верифікація + smart contract        | Permissioned ledger + мережа агентів                                | P2P-мережа вузлів із власним ledger                                                                                                                |
+| API / протоколи             | JSON-LD (W3C VC), Merkle proof, RPC вузла Bitcoin/Ethereum | JSON, JSON-RPC (Web3), DNS TXT                 | DIDComm (HTTP/WebSocket), ZeroMQ, REST (агент)                      | REST, WebSocket                                                                                                                                    |
+| СУБД / сховище              | Відсутня; Merkle root у ланцюгу                            | Storage смарт-контракту                        | RocksDB (ledger), SQLite/PostgreSQL (wallet)                        | JSON-файловий chain store з інтерфейсом, що допускає SQLite-backend; окремі сховища ключів емітента та вузла                                       |
+| Консенсус / Fault Tolerance | Bitcoin PoW / Ethereum PoS (зовнішній)                     | Ethereum PoS (зовнішній)                       | RBFT (3f+1)                                                         | PoW та PBFT, порівняльне дослідження                                                                                                               |
+| Latency фіналізації         | ≈ десятки хвилин (Bitcoin)                                 | ≈ 12,8 хв (finality Ethereum, нормальні умови) | ≈ 1–16 с (запис; 4–8 вузлів; лабораторні дані Baniata та ін., 2022) | PoW: регулюється параметром difficulty; PBFT: детермінована фіналізація після commit-фази (3f + 1). Кількісні значення — за результатами Розділу 4 |
+| Безпека / модель довіри     | Хеш + ключ емітента за HTTPS                               | Хеш + DNS TXT / DID                            | AnonCreds, ZKP, DID                                                 | SHA-256, Merkle, ECDSA/RSA (`cryptography`)                                                                                                        |
 
 Критерії «Ціна», «Популярність», «Кількість завантажень» не використані (відповідно до вимог ЛР).
 
