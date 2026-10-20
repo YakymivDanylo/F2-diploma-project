@@ -13,7 +13,12 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from blockchain_core.block import Block, attach_proposer_signature, build_candidate_block
+from blockchain_core.block import (
+  Block,
+  attach_proposer_signature,
+  build_candidate_block,
+  sign_commit,
+)
 from blockchain_core.chain import Chain
 from blockchain_core.document_record import create_document_record
 from blockchain_core.genesis import build_genesis_block
@@ -32,6 +37,7 @@ from blockchain_core.storage.chain_store import (
   ChainStoreCorruptedError,
   ChainStoreError,
   ChainStoreLockedError,
+  ChainStoreMissingError,
   ChainStoreWriteError,
   JsonChainStore,
   NodeState,
@@ -59,7 +65,7 @@ _ISSUER = generate_issuer_keypair()
 _ISSUER_ID = "issuer-1"
 _VALIDATOR_IDS = ("v0", "v1", "v2", "v3")
 _NODES = {node_id: generate_node_keypair() for node_id in _VALIDATOR_IDS}
-_VSET = ValidatorSet(members=frozenset(_VALIDATOR_IDS), f=1)
+_VSET = ValidatorSet(members=frozenset(_VALIDATOR_IDS), n=4, f=1)
 _BASE_TS = 1_700_000_001_000
 _STEP = 1_000
 _DIFFICULTY = 1
@@ -129,11 +135,10 @@ def _pbft_block(previous: Block, seed: int) -> Block:
   block = attach_proposer_signature(
     _candidate(previous, seed, "pbft", {"view_number": 0}), _NODES["v0"].private_key
   )
-  signatures = tuple(
-    sign_canonical(_NODES[node_id].private_key, block.preimage_dict())
-    for node_id in _VALIDATOR_IDS[:3]
+  commits = tuple(
+    sign_commit(block, node_id, _NODES[node_id].private_key) for node_id in _VALIDATOR_IDS[:3]
   )
-  return replace(block, commit_signatures=signatures)
+  return replace(block, commit_signatures=commits)
 
 
 def _pbft_chain(length: int) -> list[Block]:
@@ -287,7 +292,8 @@ def test_encode_chain_is_canonical_document():
   document = json.loads(encode_chain(blocks))
 
   assert document["format"] == CHAIN_FORMAT == "blockchain_core.chain"
-  assert document["version"] == CHAIN_FORMAT_VERSION == 1
+  assert document["version"] == CHAIN_FORMAT_VERSION == 2
+  assert document["blocks"][1]["commit_signatures"] == []
   assert len(document["blocks"]) == 2
 
 
@@ -310,15 +316,15 @@ def _valid_document() -> dict:
     lambda: b"{not json",
     lambda: b"\xff\xfe\x00garbage",
     lambda: json.dumps({**_valid_document(), "format": "other.chain"}).encode(),
-    lambda: json.dumps({**_valid_document(), "version": 2}).encode(),
+    lambda: json.dumps({**_valid_document(), "version": 1}).encode(),
     lambda: json.dumps({**_valid_document(), "version": True}).encode(),
     lambda: json.dumps({**_valid_document(), "blocks": []}).encode(),
     lambda: json.dumps({**_valid_document(), "blocks": "x"}).encode(),
     lambda: json.dumps([_valid_document()]).encode(),
-    lambda: encode_chain(_pow_chain(1)).replace(b'"version":1', b'"version":1.0'),
-    lambda: encode_chain(_pow_chain(1)).replace(b'"version":1', b'"version":NaN'),
-    lambda: encode_chain(_pow_chain(1)).replace(b'"version":1', b'"version":Infinity'),
-    lambda: encode_chain(_pow_chain(1)).replace(b'"version":1', b'"version":1,"version":1'),
+    lambda: encode_chain(_pow_chain(1)).replace(b'"version":2', b'"version":2.0'),
+    lambda: encode_chain(_pow_chain(1)).replace(b'"version":2', b'"version":NaN'),
+    lambda: encode_chain(_pow_chain(1)).replace(b'"version":2', b'"version":Infinity'),
+    lambda: encode_chain(_pow_chain(1)).replace(b'"version":2', b'"version":2,"version":2'),
   ],
   ids=[
     "truncated",
@@ -463,7 +469,7 @@ def test_random_bytes_in_place_of_store_file_is_corrupted(tmp_path, backend):
     "UPDATE blocks SET position = position + 5 WHERE position > 0",
     "DELETE FROM blocks",
     "DELETE FROM meta",
-    "UPDATE meta SET value = '2' WHERE key = 'version'",
+    "UPDATE meta SET value = '1' WHERE key = 'version'",
     "UPDATE blocks SET data = CAST('not json' AS BLOB) WHERE position = 1",
     "DROP TABLE blocks",
   ],
@@ -599,7 +605,7 @@ def test_fresh_start_initializes_genesis_without_creating_file(tmp_path, backend
   path = tmp_path / "chain.db"
 
   with backend(path) as store:
-    restored = _restore(store)
+    restored = _restore(store, allow_fresh=True)
 
   assert restored.valid is True
   assert isinstance(restored.chain, Chain)
@@ -608,9 +614,29 @@ def test_fresh_start_initializes_genesis_without_creating_file(tmp_path, backend
   assert not path.exists()
 
 
+# Security audit H2: a vanished chain file is never mistaken for a first start
+@pytest.mark.parametrize("backend", _BACKENDS, ids=_BACKEND_IDS)
+def test_missing_chain_without_explicit_init_fails_closed(tmp_path, backend):
+  path = tmp_path / "chain.db"
+
+  with backend(path) as store, pytest.raises(ChainStoreMissingError, match="allow_fresh"):
+    _restore(store)
+  assert not path.exists()
+
+
+def test_deleted_chain_file_is_not_silently_reset_to_genesis(tmp_path):
+  path = tmp_path / "chain.json"
+  with JsonChainStore(path) as store:
+    store.save(_pow_chain(2))
+  path.unlink()  # attacker deletes the chain while the node is down
+
+  with JsonChainStore(path) as store, pytest.raises(ChainStoreMissingError):
+    _restore(store, expected_difficulty=_DIFFICULTY)
+
+
 def test_restored_chain_is_frozen_dataclass(tmp_path):
   with JsonChainStore(tmp_path / "chain.json") as store:
-    restored = _restore(store)
+    restored = _restore(store, allow_fresh=True)
 
   assert isinstance(restored, RestoredChain)
   with pytest.raises(FrozenInstanceError):
@@ -836,7 +862,7 @@ def test_node_state_is_frozen(tmp_path):
   save_key_pair(generate_issuer_keypair(), tmp_path / "issuer.pem")
   save_key_pair(generate_node_keypair(), tmp_path / "node.pem")
   with JsonChainStore(tmp_path / "chain.json") as store:
-    state = restore_node_state(store, **_node_state_kwargs(tmp_path))
+    state = restore_node_state(store, **_node_state_kwargs(tmp_path, allow_fresh=True))
 
   with pytest.raises(FrozenInstanceError):
     state.node_key = None
@@ -847,7 +873,7 @@ def test_node_state_on_fresh_start_begins_at_genesis(tmp_path):
   save_key_pair(generate_node_keypair(), tmp_path / "node.pem")
 
   with JsonChainStore(tmp_path / "chain.json") as store:
-    state = restore_node_state(store, **_node_state_kwargs(tmp_path))
+    state = restore_node_state(store, **_node_state_kwargs(tmp_path, allow_fresh=True))
 
   assert state.restored.chain.blocks == (build_genesis_block(),)
   assert not (tmp_path / "chain.json").exists()
@@ -1040,3 +1066,31 @@ def test_encrypted_private_key_file_is_corrupted_not_type_error(tmp_path):
 
   with pytest.raises(KeyStoreCorruptedError):
     load_issuer_key_pair(path)
+
+
+# Format v2: commit votes are {node_id, signature} objects, decoded strictly
+@pytest.mark.parametrize(
+  "commit",
+  [
+    "ab" * 32,
+    {"node_id": "v0"},
+    {"node_id": "v0", "signature": 5},
+    {"node_id": 1, "signature": "ab"},
+  ],
+  ids=["bare_string", "missing_signature", "int_signature", "int_node_id"],
+)
+def test_malformed_commit_entry_is_corrupted(commit):
+  data = block_to_dict(_pbft_chain(1)[1])
+  data["commit_signatures"] = [commit]
+
+  with pytest.raises(ChainStoreCorruptedError, match="commit_signatures"):
+    block_from_dict(data)
+
+
+def test_commit_votes_round_trip_with_their_node_ids():
+  block = _pbft_chain(1)[1]
+
+  data = block_to_dict(block)
+
+  assert [commit["node_id"] for commit in data["commit_signatures"]] == list(_VALIDATOR_IDS[:3])
+  assert block_from_dict(data).commit_signatures == block.commit_signatures

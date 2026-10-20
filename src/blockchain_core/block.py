@@ -16,15 +16,24 @@ from .signing import sign_canonical
 Algorithm = Literal["pow", "pbft", "genesis"]
 
 __all__ = [
+  "COMMIT_DOMAIN",
   "Algorithm",
   "Block",
+  "CommitSignature",
   "DuplicateDocumentHashError",
   "EmptyBatchError",
   "InvalidBlockParametersError",
   "InvalidRecordSignatureError",
   "attach_proposer_signature",
   "build_candidate_block",
+  "commit_payload",
+  "sign_commit",
 ]
+
+# Domain tag of a PBFT commit vote. A commit signs `commit_payload(block_hash)`, never the
+# bare preimage, so neither a `proposer_signature` nor any other message a node signs can
+# be replayed as a commit vote. Every further message type must carry its own domain.
+COMMIT_DOMAIN = "blockchain_core/pbft-commit/v1"
 
 
 class InvalidRecordSignatureError(ValueError):
@@ -49,6 +58,14 @@ class DuplicateDocumentHashError(ValueError):
 
 class InvalidBlockParametersError(ValueError):
   """Raised when build_candidate_block is given parameters no real block may have."""
+
+
+@dataclass(frozen=True)
+class CommitSignature:
+  """One validator's PBFT commit vote: who signed, and the signature over the commit payload."""
+
+  node_id: str
+  signature: str
 
 
 @dataclass(frozen=True)
@@ -77,7 +94,7 @@ class Block:
   # -- attestations, attached strictly after hashing --
   block_hash: str
   proposer_signature: str | None = None
-  commit_signatures: tuple[str, ...] = ()
+  commit_signatures: tuple[CommitSignature, ...] = ()
 
   def __post_init__(self) -> None:
     # Detach from the caller's dict and make it read-only: block_hash covers it.
@@ -170,6 +187,24 @@ def build_candidate_block(
     block_hash="",
   )
   return replace(block, block_hash=sha256_of_canonical(block.preimage_dict()))
+
+
+def commit_payload(block_hash: str) -> dict[str, str]:
+  """The exact structure a commit vote signs - `block_hash` binds the whole preimage."""
+  return {"domain": COMMIT_DOMAIN, "block_hash": block_hash}
+
+
+def sign_commit(
+  block: Block,
+  node_id: str,
+  node_private_key: PrivateKey | KeyPair,
+) -> CommitSignature:
+  """A validator's commit vote for `block`; an `IssuerKeyPair` is refused."""
+  signing_key = resolve_signing_key(node_private_key, NodeKeyPair)
+  return CommitSignature(
+    node_id=node_id,
+    signature=sign_canonical(signing_key, commit_payload(block.block_hash)),
+  )
 
 
 def attach_proposer_signature(block: Block, node_private_key: PrivateKey | KeyPair) -> Block:

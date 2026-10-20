@@ -36,7 +36,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Protocol, Self
 
-from ..block import Block
+from ..block import Block, CommitSignature
 from ..canonical import MAX_DEPTH, canonicalize
 from ..chain import Chain
 from ..document_record import DocumentRecord
@@ -56,6 +56,7 @@ __all__ = [
   "ChainStoreCorruptedError",
   "ChainStoreError",
   "ChainStoreLockedError",
+  "ChainStoreMissingError",
   "ChainStoreWriteError",
   "JsonChainStore",
   "NodeState",
@@ -70,7 +71,7 @@ __all__ = [
 ]
 
 CHAIN_FORMAT = "blockchain_core.chain"
-CHAIN_FORMAT_VERSION = 1
+CHAIN_FORMAT_VERSION = 2  # 2: commit votes are {node_id, signature} objects
 
 _BLOCK_KEYS = frozenset(
   {
@@ -90,6 +91,7 @@ _BLOCK_KEYS = frozenset(
 _RECORD_KEYS = frozenset(
   {"document_hash", "issuer_id", "issued_at", "metadata", "ipfs_cid", "signature"}
 )
+_COMMIT_KEYS = frozenset({"node_id", "signature"})
 _DOCUMENT_KEYS = frozenset({"format", "version", "blocks"})
 
 
@@ -103,6 +105,10 @@ class ChainStoreCorruptedError(ChainStoreError, ValueError):
 
 class ChainStoreLockedError(ChainStoreError):
   """Raised when another open store already holds the single-writer lock for a path."""
+
+
+class ChainStoreMissingError(ChainStoreError):
+  """Raised when no persisted chain exists and the caller did not ask for a fresh one."""
 
 
 class ChainStoreWriteError(ChainStoreError):
@@ -129,7 +135,10 @@ def block_to_dict(block: Block) -> dict[str, Any]:
       "document_records": [record.signed_dict() for record in block.document_records],
       "block_hash": block.block_hash,
       "proposer_signature": block.proposer_signature,
-      "commit_signatures": block.commit_signatures,
+      "commit_signatures": [
+        {"node_id": commit.node_id, "signature": commit.signature}
+        for commit in block.commit_signatures
+      ],
     }
   )
   return result
@@ -194,6 +203,13 @@ def _check_depth(data: object) -> None:
       stack.extend((item, depth + 1) for item in value)
 
 
+def _commit_from_dict(data: object, what: str) -> CommitSignature:
+  fields = _require_keys(data, _COMMIT_KEYS, what)
+  return CommitSignature(
+    node_id=_str(fields, "node_id", what), signature=_str(fields, "signature", what)
+  )
+
+
 def block_from_dict(data: object) -> Block:
   """Rebuild a Block from `block_to_dict` output, checking shape only - never validity."""
   _check_depth(data)
@@ -206,8 +222,8 @@ def block_from_dict(data: object) -> Block:
   if not isinstance(records, list):
     raise _corrupt(f"{what}.document_records must be an array")
   commits = fields["commit_signatures"]
-  if not isinstance(commits, list) or not all(isinstance(c, str) for c in commits):
-    raise _corrupt(f"{what}.commit_signatures must be an array of strings")
+  if not isinstance(commits, list):
+    raise _corrupt(f"{what}.commit_signatures must be an array")
   return Block(
     index=_int(fields, "index", what),
     timestamp=_int(fields, "timestamp", what),
@@ -222,7 +238,10 @@ def block_from_dict(data: object) -> Block:
     ),
     block_hash=_str(fields, "block_hash", what),
     proposer_signature=_str(fields, "proposer_signature", what, optional=True),
-    commit_signatures=tuple(commits),
+    commit_signatures=tuple(
+      _commit_from_dict(commit, f"{what}.commit_signatures[{position}]")
+      for position, commit in enumerate(commits)
+    ),
   )
 
 
@@ -514,10 +533,15 @@ def restore_chain(
   resolve_issuer_key: KeyResolver,
   expected_difficulty: int | None = None,
   validator_set: ValidatorSet | None = None,
+  allow_fresh: bool = False,
 ) -> RestoredChain:
   """Load and fully validate the persisted chain before the node resumes.
 
-  No persisted chain yet: a fresh `Chain` at the shared genesis (nothing is written).
+  No persisted chain: `ChainStoreMissingError`, unless the caller explicitly initializes
+  a new node with `allow_fresh=True` - then a fresh `Chain` at the shared genesis
+  (nothing is written). A chain file that vanished while the node was down is therefore
+  never mistaken for a first start. Truncation to a valid prefix cannot be detected
+  locally; Epic 3 must sync with peers before serving.
   Persisted chain fails validation: `chain` is None, so it cannot be extended, and
   `validation` carries the failing index and `failure_type` for the operator.
   A corrupted store raises `ChainStoreCorruptedError` - never a partial chain.
@@ -525,6 +549,10 @@ def restore_chain(
   by design: a new difficulty requires a fresh chain.
   """
   loaded = store.load()
+  if loaded is None and not allow_fresh:
+    raise ChainStoreMissingError(
+      "no persisted chain found; pass allow_fresh=True only when initializing a new node"
+    )
   blocks = tuple(loaded) if loaded is not None else Chain().blocks
   validation = validate_chain(
     blocks,
@@ -550,6 +578,7 @@ def restore_node_state(
   resolve_issuer_key: KeyResolver,
   expected_difficulty: int | None = None,
   validator_set: ValidatorSet | None = None,
+  allow_fresh: bool = False,
 ) -> NodeState:
   """Reload all three stores; missing key material fails fast and is never regenerated."""
   issuer_key = load_issuer_key_pair(issuer_key_path)
@@ -560,5 +589,6 @@ def restore_node_state(
     resolve_issuer_key=resolve_issuer_key,
     expected_difficulty=expected_difficulty,
     validator_set=validator_set,
+    allow_fresh=allow_fresh,
   )
   return NodeState(restored=restored, issuer_key=issuer_key, node_key=node_key)

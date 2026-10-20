@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import replace
 
 import pytest
@@ -106,18 +107,28 @@ def _validate(blocks, **overrides):
 
 
 def _rehash(block: Block, **changes) -> Block:
-  """Self-consistent tampering: change fields, recompute block_hash, keep old signature."""
+  """Self-consistent tampering: change fields, recompute block_hash, re-mine, keep signatures.
+
+  Re-mining is what a real attacker does (difficulty 1 is cheap), so the PoW check, which
+  runs before Merkle and signatures, is never what catches these tampered blocks.
+  """
   changed = replace(block, **changes)
-  return replace(changed, block_hash=sha256_of_canonical(changed.preimage_dict()))
+  return _mine(replace(changed, block_hash=sha256_of_canonical(changed.preimage_dict())))
 
 
 def _mine(block: Block) -> Block:
-  """Search `nonce` until block_hash meets the declared difficulty's target."""
-  difficulty = block.sealed_consensus["difficulty"]
+  """Search `nonce` until block_hash meets the declared difficulty's target (PoW only)."""
+  sealed = block.sealed_consensus
+  if block.algorithm != "pow" or not isinstance(sealed, Mapping):
+    return block
+  difficulty = sealed.get("difficulty")
+  if type(difficulty) is not int:
+    return block
   nonce = 0
   while int(block.block_hash, 16) >= pow_target(difficulty):
     nonce += 1
-    block = _rehash(block, sealed_consensus={**block.sealed_consensus, "nonce": nonce})
+    block = replace(block, sealed_consensus={**block.sealed_consensus, "nonce": nonce})
+    block = replace(block, block_hash=sha256_of_canonical(block.preimage_dict()))
   return block
 
 

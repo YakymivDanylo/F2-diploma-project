@@ -1,10 +1,14 @@
 from .block import (
+  COMMIT_DOMAIN,
   Block,
+  CommitSignature,
   DuplicateDocumentHashError,
   InvalidBlockParametersError,
   InvalidRecordSignatureError,
   attach_proposer_signature,
   build_candidate_block,
+  commit_payload,
+  sign_commit,
 )
 from .canonical import CanonicalizationError, canonicalize, deep_freeze
 from .chain import (
@@ -54,6 +58,7 @@ from .storage.chain_store import (
   ChainStoreCorruptedError,
   ChainStoreError,
   ChainStoreLockedError,
+  ChainStoreMissingError,
   ChainStoreWriteError,
   JsonChainStore,
   NodeState,
@@ -83,6 +88,7 @@ from .validation import (
 )
 
 __all__ = [
+  "COMMIT_DOMAIN",
   "GENESIS_BLOCK_HASH",
   "Block",
   "CanonicalizationError",
@@ -91,7 +97,9 @@ __all__ = [
   "ChainStoreCorruptedError",
   "ChainStoreError",
   "ChainStoreLockedError",
+  "ChainStoreMissingError",
   "ChainStoreWriteError",
+  "CommitSignature",
   "DocumentHashNotFoundError",
   "DocumentRecord",
   "DuplicateDocumentHashError",
@@ -130,6 +138,7 @@ __all__ = [
   "build_proof",
   "build_root",
   "canonicalize",
+  "commit_payload",
   "create_document_record",
   "deep_freeze",
   "generate_issuer_keypair",
@@ -150,6 +159,7 @@ __all__ = [
   "sha256_of_canonical",
   "sign_bytes",
   "sign_canonical",
+  "sign_commit",
   "validate_chain",
   "validate_extension",
   "verify_bytes",

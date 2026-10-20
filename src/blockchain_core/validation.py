@@ -22,7 +22,7 @@ from typing import Literal
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from .block import Block
+from .block import Block, CommitSignature, commit_payload
 from .canonical import CanonicalizationError
 from .document_record import DocumentRecord, verify_document_record
 from .genesis import GENESIS_BLOCK_HASH, build_genesis_block
@@ -81,14 +81,20 @@ def pow_target(difficulty: int) -> int:
 
 @dataclass(frozen=True)
 class ValidatorSet:
-  """Static PBFT membership: the `node_id`s whose commit signatures count, and `f`.
+  """Static PBFT configuration: who may vote (`members`), network size `n`, and `f`.
 
-  Keys are not held here - each member's key is resolved through the injected
-  `resolve_node_key(node_id, block.timestamp)`, so rotated keys keep validating old
-  blocks. Requires `n >= 3f + 1`.
+  `members` lists every `node_id` that was ever a validator, retired ones included, so
+  old blocks keep their voters; `n` is the configured network size the quorum is
+  computed from, independent of how many entries `members` has accumulated. Whether a
+  member could vote at a given time is decided by the injected
+  `resolve_node_key(node_id, block.timestamp)`: it returns None outside the member's
+  active period, which fails closed. Keys are never held here.
+
+  Requires `len(members) >= n >= 3f + 1`.
   """
 
   members: frozenset[str]
+  n: int
   f: int
 
   def __post_init__(self) -> None:
@@ -98,12 +104,10 @@ class ValidatorSet:
       raise ValueError("every member must be a non-empty string node id")
     if type(self.f) is not int or self.f < 0:
       raise ValueError(f"f must be a non-negative int, got {self.f!r}")
-    if len(self.members) < 3 * self.f + 1:
-      raise ValueError(f"n={len(self.members)} cannot tolerate f={self.f}: need n >= 3f + 1")
-
-  @property
-  def n(self) -> int:
-    return len(self.members)
+    if type(self.n) is not int or self.n < 3 * self.f + 1:
+      raise ValueError(f"n={self.n!r} cannot tolerate f={self.f}: need n >= 3f + 1")
+    if len(self.members) < self.n:
+      raise ValueError(f"members lists {len(self.members)} node ids, fewer than n={self.n}")
 
   @property
   def quorum(self) -> int:
@@ -172,6 +176,15 @@ def _well_formed(block: object) -> bool:
     and isinstance(block.document_records, tuple)
     and all(isinstance(record, DocumentRecord) for record in block.document_records)
     and isinstance(block.commit_signatures, tuple)
+    and all(_commit_well_formed(commit) for commit in block.commit_signatures)
+  )
+
+
+def _commit_well_formed(commit: object) -> bool:
+  return (
+    isinstance(commit, CommitSignature)
+    and isinstance(commit.node_id, str)
+    and isinstance(commit.signature, str)
   )
 
 
@@ -239,31 +252,26 @@ def _distinct_commit_signers(
   validator_set: ValidatorSet,
   resolve_node_key: KeyResolver,
 ) -> set[str]:
-  """Members with a valid signature over the preimage; each member is counted once.
+  """Members with a valid commit vote for this block; each member and each key counts once.
 
-  `commit_signatures` carries no signer id, so each signature is attributed to the
-  member whose key (active at `block.timestamp`) verifies it. A matched member is
-  removed from the candidates, so a repeated signer can never be counted twice, and
-  the work stays bounded by `n` verifications per signature. Members that resolve to
-  the same public key (a misconfiguration) count as one signer: one key, one vote.
+  A vote counts only if its `node_id` is a member, the key active for that member at
+  `block.timestamp` verifies it over `commit_payload(block.block_hash)`, and neither the
+  member nor its key has been counted already - so a repeated vote, or two ids that
+  resolve to the same key (a misconfiguration), can never add weight.
   """
-  candidates: dict[str, PublicKey] = {}
-  seen_keys: set[bytes] = set()
-  for node_id in sorted(validator_set.members):
-    key = _resolve(resolve_node_key, node_id, block.timestamp)
-    fingerprint = _key_fingerprint(key)
-    if key is None or fingerprint is None or fingerprint in seen_keys:
-      continue
-    seen_keys.add(fingerprint)
-    candidates[node_id] = key
-  preimage = block.preimage_dict()
+  payload = commit_payload(block.block_hash)
   signers: set[str] = set()
-  for signature in block.commit_signatures:
-    for node_id, key in candidates.items():
-      if verify_canonical(key, preimage, signature):
-        signers.add(node_id)
-        del candidates[node_id]
-        break
+  counted_keys: set[bytes] = set()
+  for commit in block.commit_signatures:
+    if commit.node_id not in validator_set.members or commit.node_id in signers:
+      continue
+    key = _resolve(resolve_node_key, commit.node_id, block.timestamp)
+    fingerprint = _key_fingerprint(key)
+    if key is None or fingerprint is None or fingerprint in counted_keys:
+      continue
+    if verify_canonical(key, payload, commit.signature):
+      signers.add(commit.node_id)
+      counted_keys.add(fingerprint)
   return signers
 
 
@@ -274,26 +282,14 @@ def _quorum_ok(
 ) -> bool:
   if validator_set is None:
     return False
-  # A well-formed commit set holds at most one signature per member; anything longer
-  # is rejected outright, which also bounds the verification work an attacker can force.
-  if len(block.commit_signatures) > validator_set.n:
+  if block.proposer_id not in validator_set.members:
+    return False  # only a validator may propose a PBFT block
+  # A well-formed commit set holds at most one vote per member; anything longer is
+  # rejected outright, which also bounds the verification work an attacker can force.
+  if len(block.commit_signatures) > len(validator_set.members):
     return False
   signers = _distinct_commit_signers(block, validator_set, resolve_node_key)
   return len(signers) >= validator_set.quorum
-
-
-def _consensus_failure(
-  block: Block,
-  resolve_node_key: KeyResolver,
-  expected_difficulty: int | None,
-  validator_set: ValidatorSet | None,
-) -> FailureType | None:
-  """Algorithm-specific checks; a missing parameter fails closed instead of skipping."""
-  if block.algorithm == "pow" and not _pow_ok(block, expected_difficulty):
-    return "difficulty"
-  if block.algorithm == "pbft" and not _quorum_ok(block, validator_set, resolve_node_key):
-    return "quorum"
-  return None
 
 
 def _validate_block(
@@ -314,14 +310,19 @@ def _validate_block(
     return "hash", ""
   if block.previous_hash != previous_hash:
     return "link", recomputed
+  # Proof of work first: one integer comparison filters unmined blocks before any
+  # Merkle hashing or signature verification is spent on them.
+  if block.algorithm == "pow" and not _pow_ok(block, expected_difficulty):
+    return "difficulty", recomputed
   if not _merkle_ok(block):
     return "merkle", recomputed
   if not _signatures_ok(block, resolve_node_key, resolve_issuer_key):
     return "signature", recomputed
   if not _structure_ok(block, previous):
     return "structural", recomputed
-  failure = _consensus_failure(block, resolve_node_key, expected_difficulty, validator_set)
-  return failure, recomputed
+  if block.algorithm == "pbft" and not _quorum_ok(block, validator_set, resolve_node_key):
+    return "quorum", recomputed
+  return None, recomputed
 
 
 def _validate_run(
@@ -361,15 +362,16 @@ def validate_chain(
 ) -> ValidationResult:
   """Validate `blocks` front to back and report the earliest failing block.
 
-  Per non-genesis block, in order: `"hash"`, `"link"`, `"merkle"`, `"signature"`
-  (proposer and every document record), `"structural"` (index, timestamp, duplicate
-  `document_hash` within the block), then the algorithm-specific check:
+  Per non-genesis block, in order: `"hash"`, `"link"`, `"difficulty"` (PoW only),
+  `"merkle"`, `"signature"` (proposer and every document record), `"structural"`
+  (index, timestamp, duplicate `document_hash` within the block), `"quorum"` (PBFT only):
 
   - `"pow"`: `sealed_consensus["difficulty"]` must equal `expected_difficulty` and
-    `block_hash` must be numerically below `pow_target(difficulty)` - else `"difficulty"`.
-  - `"pbft"`: `commit_signatures` must hold valid preimage signatures from at least
-    `validator_set.quorum` distinct members, keys resolved at `block.timestamp`; a
-    repeated signer counts once - else `"quorum"`.
+    `block_hash` must be numerically below `pow_target(difficulty)`. Checked right after
+    the hash chain because it costs one comparison.
+  - `"pbft"`: the proposer must be a member, and `commit_signatures` must hold valid
+    votes over `commit_payload(block_hash)` from at least `validator_set.quorum`
+    distinct members, keys resolved at `block.timestamp`; a repeated vote counts once.
 
   A PoW block validated without `expected_difficulty`, or a PBFT block without
   `validator_set`, fails closed with that failure type - omitting a parameter never

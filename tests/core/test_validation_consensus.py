@@ -9,7 +9,13 @@ from dataclasses import replace
 
 import pytest
 
-from blockchain_core.block import Block, attach_proposer_signature, build_candidate_block
+from blockchain_core.block import (
+  Block,
+  CommitSignature,
+  attach_proposer_signature,
+  build_candidate_block,
+  sign_commit,
+)
 from blockchain_core.document_record import create_document_record
 from blockchain_core.genesis import build_genesis_block
 from blockchain_core.hashing import sha256_hex, sha256_of_canonical
@@ -32,7 +38,7 @@ _VALIDATOR_IDS = ("v0", "v1", "v2", "v3")
 _NODES = {node_id: generate_node_keypair() for node_id in _VALIDATOR_IDS}
 _OUTSIDER_ID = "outsider"
 _OUTSIDER = generate_node_keypair()
-_VSET = ValidatorSet(members=frozenset(_VALIDATOR_IDS), f=1)
+_VSET = ValidatorSet(members=frozenset(_VALIDATOR_IDS), n=4, f=1)
 _BASE_TS = 1_700_000_001_000
 _STEP = 1_000
 # Not a multiple of 4: a "count leading '0' characters" check can only see 4-bit steps.
@@ -104,14 +110,18 @@ def _pow_chain(length: int, *, difficulty: int = _DIFFICULTY) -> list[Block]:
   return blocks
 
 
-def _commit_signature(block: Block, key_pair) -> str:
+def _preimage_signature(block: Block, key_pair) -> str:
   return sign_canonical(key_pair.private_key, block.preimage_dict())
 
 
-def _with_commits(block: Block, signer_ids) -> Block:
+def _commit(block: Block, node_id: str, key_pair=None) -> CommitSignature:
   keys = {**_NODES, _OUTSIDER_ID: _OUTSIDER}
-  signatures = tuple(_commit_signature(block, keys[node_id]) for node_id in signer_ids)
-  return replace(block, commit_signatures=signatures)
+  return sign_commit(block, node_id, (key_pair or keys[node_id]).private_key)
+
+
+def _with_commits(block: Block, signer_ids) -> Block:
+  commits = tuple(_commit(block, node_id) for node_id in signer_ids)
+  return replace(block, commit_signatures=commits)
 
 
 def _pbft_block(previous: Block, seed: int, signer_ids=_VALIDATOR_IDS[:3]) -> Block:
@@ -238,16 +248,27 @@ def test_malformed_expected_difficulty_parameter_raises(expected):
     _validate(_pow_chain(1), expected_difficulty=expected)
 
 
-def test_earlier_checks_take_precedence_over_difficulty():
-  """An unmined block with a broken proposer signature is reported as a signature failure."""
+def test_difficulty_is_checked_before_merkle_and_signatures():
+  """Proof of work is the cheap filter: an unmined block is rejected before any signature."""
   genesis = build_genesis_block()
   block = _pow_block(genesis, 1, accept=lambda value: value >= pow_target(_DIFFICULTY))
-  block = replace(block, proposer_signature=_commit_signature(block, _OUTSIDER))
+  block = replace(block, proposer_signature=_preimage_signature(block, _OUTSIDER))
 
-  _assert_invalid(_validate_pow([genesis, block]), 1, "signature")
+  _assert_invalid(_validate_pow([genesis, block]), 1, "difficulty")
+
+
+def test_hash_chain_checks_take_precedence_over_difficulty():
+  blocks = _pow_chain(2)
+  unlinked = _rehash(blocks[2], previous_hash="ab" * 32)
+
+  _assert_invalid(_validate_pow([*blocks[:2], unlinked]), 2, "link")
 
 
 # ---------------------------------------------------------------- ValidatorSet
+
+
+def _ids(count: int) -> frozenset[str]:
+  return frozenset(f"n{i}" for i in range(count))
 
 
 @pytest.mark.parametrize(
@@ -255,40 +276,57 @@ def test_earlier_checks_take_precedence_over_difficulty():
   [(1, 0, 1), (4, 1, 3), (7, 2, 5), (10, 3, 7), (4, 0, 3), (5, 1, 4)],
 )
 def test_quorum_size(n, f, quorum):
-  members = frozenset(f"n{i}" for i in range(n))
-
-  assert ValidatorSet(members=members, f=f).quorum == quorum
+  assert ValidatorSet(members=_ids(n), n=n, f=f).quorum == quorum
 
 
 def test_quorum_is_two_f_plus_one_for_canonical_n():
   for f in range(6):
-    members = frozenset(f"n{i}" for i in range(3 * f + 1))
-    assert ValidatorSet(members=members, f=f).quorum == 2 * f + 1
+    n = 3 * f + 1
+    assert ValidatorSet(members=_ids(n), n=n, f=f).quorum == 2 * f + 1
 
 
 def test_any_two_quorums_share_an_honest_member():
   for n in range(1, 20):
     for f in range(0, (n - 1) // 3 + 1):
-      quorum = ValidatorSet(members=frozenset(f"n{i}" for i in range(n)), f=f).quorum
+      quorum = ValidatorSet(members=_ids(n), n=n, f=f).quorum
       assert 2 * quorum - n >= f + 1
 
 
+def test_quorum_follows_configured_n_not_the_member_count():
+  """Retired validators stay listed for old blocks without raising the quorum."""
+  with_retired = ValidatorSet(members=_ids(6), n=4, f=1)
+
+  assert with_retired.quorum == 3
+
+
 @pytest.mark.parametrize(
-  ("members", "f"),
+  ("members", "n", "f"),
   [
-    (frozenset(), 0),
-    (frozenset({"a", "b", "c"}), 1),
-    (frozenset({"a", ""}), 0),
-    (frozenset({"a", 1}), 0),
-    ({"a", "b", "c", "d"}, 1),
-    (frozenset({"a"}), -1),
-    (frozenset({"a"}), True),
+    (frozenset(), 0, 0),
+    (frozenset({"a", "b", "c"}), 3, 1),
+    (frozenset({"a", ""}), 2, 0),
+    (frozenset({"a", 1}), 2, 0),
+    ({"a", "b", "c", "d"}, 4, 1),
+    (frozenset({"a"}), 1, -1),
+    (frozenset({"a"}), 1, True),
+    (frozenset({"a", "b", "c"}), 4, 1),
+    (frozenset({"a", "b", "c", "d"}), True, 0),
   ],
-  ids=["empty", "n_lt_3f_plus_1", "empty_id", "non_str_id", "plain_set", "negative_f", "bool_f"],
+  ids=[
+    "empty",
+    "n_lt_3f_plus_1",
+    "empty_id",
+    "non_str_id",
+    "plain_set",
+    "negative_f",
+    "bool_f",
+    "fewer_members_than_n",
+    "bool_n",
+  ],
 )
-def test_validator_set_rejects_invalid_configuration(members, f):
+def test_validator_set_rejects_invalid_configuration(members, n, f):
   with pytest.raises(ValueError):
-    ValidatorSet(members=members, f=f)
+    ValidatorSet(members=members, n=n, f=f)
 
 
 def test_wrong_validator_set_type_raises():
@@ -325,7 +363,7 @@ def test_repeated_signer_with_distinct_signature_bytes_counts_once():
   genesis = build_genesis_block()
   block = _pbft_block(genesis, 1, ("v0", "v0", "v1"))
 
-  assert block.commit_signatures[0] != block.commit_signatures[1]
+  assert block.commit_signatures[0].signature != block.commit_signatures[1].signature
   _assert_invalid(_validate_pbft([genesis, block]), 1, "quorum")
 
 
@@ -336,7 +374,9 @@ def test_quorum_with_an_extra_repeated_signer_still_validates():
 def test_more_commit_signatures_than_members_is_rejected():
   genesis = build_genesis_block()
   block = _pbft_block(genesis, 1, _VALIDATOR_IDS)
-  padded = replace(block, commit_signatures=(*block.commit_signatures, "ab" * 64))
+  padded = replace(
+    block, commit_signatures=(*block.commit_signatures, CommitSignature("v0", "ab" * 64))
+  )
 
   _assert_invalid(_validate_pbft([genesis, padded]), 1, "quorum")
 
@@ -351,7 +391,7 @@ def test_commit_signature_over_another_block_does_not_count():
   block = _pbft_block(genesis, 1, ("v0", "v1"))
   forged = replace(
     block,
-    commit_signatures=(*block.commit_signatures, _commit_signature(other, _NODES["v2"])),
+    commit_signatures=(*block.commit_signatures, _commit(other, "v2")),
   )
 
   _assert_invalid(_validate_pbft([genesis, forged]), 1, "quorum")
@@ -359,15 +399,84 @@ def test_commit_signature_over_another_block_does_not_count():
 
 @pytest.mark.parametrize(
   "junk",
-  ["", "zz", "AB" * 32, "ab" * 32 + " ", None, 42],
-  ids=["empty", "non_hex", "uppercase", "whitespace", "none", "int"],
+  ["", "zz", "AB" * 32, "ab" * 32 + " "],
+  ids=["empty", "non_hex", "uppercase", "whitespace"],
 )
 def test_malformed_commit_signature_does_not_count_and_does_not_raise(junk):
   genesis = build_genesis_block()
   block = _pbft_block(genesis, 1, ("v0", "v1"))
-  forged = replace(block, commit_signatures=(*block.commit_signatures, junk))
+  forged = replace(block, commit_signatures=(*block.commit_signatures, CommitSignature("v2", junk)))
 
   _assert_invalid(_validate_pbft([genesis, forged]), 1, "quorum")
+
+
+@pytest.mark.parametrize(
+  "entry",
+  ["ab" * 32, None, CommitSignature("v2", None), CommitSignature(None, "ab" * 32)],
+  ids=["bare_string", "none", "signature_none", "node_id_none"],
+)
+def test_malformed_commit_entry_is_structural(entry):
+  genesis = build_genesis_block()
+  block = _pbft_block(genesis, 1, ("v0", "v1"))
+  forged = replace(block, commit_signatures=(*block.commit_signatures, entry))
+
+  _assert_invalid(_validate_pbft([genesis, forged]), 1, "structural")
+
+
+# Domain separation (security audit H1): only a commit vote over the commit payload counts
+def test_proposer_signature_replayed_as_commit_vote_does_not_count():
+  genesis = build_genesis_block()
+  block = _pbft_block(genesis, 1, ("v1", "v2"))  # proposer v0 did not vote
+  replayed = CommitSignature("v0", block.proposer_signature)
+  forged = replace(block, commit_signatures=(*block.commit_signatures, replayed))
+
+  _assert_invalid(_validate_pbft([genesis, forged]), 1, "quorum")
+
+
+def test_signature_over_the_bare_preimage_does_not_count_as_commit():
+  genesis = build_genesis_block()
+  block = _pbft_block(genesis, 1, ("v0", "v1"))
+  preimage_vote = CommitSignature("v2", _preimage_signature(block, _NODES["v2"]))
+  forged = replace(block, commit_signatures=(*block.commit_signatures, preimage_vote))
+
+  _assert_invalid(_validate_pbft([genesis, forged]), 1, "quorum")
+
+
+def test_commit_vote_labelled_with_another_members_id_does_not_count():
+  genesis = build_genesis_block()
+  block = _pbft_block(genesis, 1, ("v0", "v1"))
+  mislabelled = _commit(block, "v2", _NODES["v3"])  # v3's signature claiming to be v2
+  forged = replace(block, commit_signatures=(*block.commit_signatures, mislabelled))
+
+  _assert_invalid(_validate_pbft([genesis, forged]), 1, "quorum")
+
+
+def test_pbft_block_proposed_by_a_non_member_is_rejected():
+  genesis = build_genesis_block()
+  candidate = _rehash(_candidate(genesis, 1, "pbft", {"view_number": 0}), proposer_id=_OUTSIDER_ID)
+  block = attach_proposer_signature(candidate, _OUTSIDER.private_key)
+  block = _with_commits(block, ("v0", "v1", "v2"))  # a full quorum of real members
+
+  _assert_invalid(_validate_pbft([genesis, block]), 1, "quorum")
+
+
+def test_retired_member_listed_in_members_only_counts_while_its_key_resolves():
+  vset = ValidatorSet(members=frozenset({*_VALIDATOR_IDS, "retired"}), n=4, f=1)
+  retired_key = generate_node_keypair()
+  blocks = _pbft_chain(2, ("v0", "v1"))
+  for position in (1, 2):
+    block = blocks[position]
+    blocks[position] = replace(
+      block, commit_signatures=(*block.commit_signatures, _commit(block, "retired", retired_key))
+    )
+  retired_at = blocks[2].timestamp
+
+  def resolver(node_id, at_timestamp):
+    if node_id == "retired":
+      return retired_key.public_key if at_timestamp < retired_at else None
+    return _resolve_node_key(node_id, at_timestamp)
+
+  _assert_invalid(_validate(blocks, validator_set=vset, resolve_node_key=resolver), 2, "quorum")
 
 
 def test_non_tuple_commit_signatures_is_structural():
@@ -416,7 +525,7 @@ def test_commit_keys_are_resolved_at_block_timestamp():
   assert ("v2", blocks[2].timestamp) in calls
 
   # Re-signing block 2's commit with the post-rotation key makes the chain valid.
-  v2_commit = _commit_signature(blocks[2], new_v2)
+  v2_commit = _commit(blocks[2], "v2", new_v2)
   blocks[2] = replace(blocks[2], commit_signatures=(*blocks[2].commit_signatures[:2], v2_commit))
   assert _validate_pbft(blocks, resolve_node_key=resolver).valid
 
@@ -488,7 +597,10 @@ def test_members_sharing_one_public_key_count_as_one_signer():
     return _resolve_node_key("v0" if node_id == "v1" else node_id, at_timestamp)
 
   genesis = build_genesis_block()
-  block = _pbft_block(genesis, 1, ("v0", "v0", "v2"))
+  block = _pbft_block(genesis, 1, ("v0", "v2"))
+  block = replace(
+    block, commit_signatures=(*block.commit_signatures, _commit(block, "v1", _NODES["v0"]))
+  )
 
   _assert_invalid(_validate_pbft([genesis, block], resolve_node_key=resolver), 1, "quorum")
   assert _validate_pbft([genesis, _pbft_block(genesis, 1, ("v0", "v2", "v3"))]).valid

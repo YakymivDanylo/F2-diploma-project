@@ -40,8 +40,9 @@ Notes for the thesis text:
   `previous_hash` (7.6b), independently of any signature.
 - Record-level integrity is a second, orthogonal layer: the issuer signature fails even
   when the node key is compromised and the block is perfectly re-hashed/re-signed (7.8).
-- In PBFT, `commit_signatures` are over the preimage, so a rehashed block is left with stale
-  commits and fails the quorum check even though its proposer signature is valid.
+- In PBFT, each commit vote signs `{domain, block_hash}`, so a rehashed block is left with
+  stale commits and fails the quorum check even though its proposer signature is valid; a
+  proposer signature cannot be replayed as a vote because it signs a different payload.
 """
 
 from __future__ import annotations
@@ -51,13 +52,18 @@ from dataclasses import replace
 
 import pytest
 
-from blockchain_core.block import Block, attach_proposer_signature, build_candidate_block
+from blockchain_core.block import (
+  Block,
+  attach_proposer_signature,
+  build_candidate_block,
+  sign_commit,
+)
 from blockchain_core.document_record import create_document_record, verify_document_record
 from blockchain_core.genesis import build_genesis_block
 from blockchain_core.hashing import sha256_hex, sha256_of_canonical
 from blockchain_core.keys import generate_issuer_keypair, generate_node_keypair
 from blockchain_core.merkle import build_proof, build_root, verify_proof
-from blockchain_core.signing import sign_canonical, verify_canonical
+from blockchain_core.signing import verify_canonical
 from blockchain_core.storage.chain_store import (
   JsonChainStore,
   SqliteChainStore,
@@ -72,7 +78,7 @@ _ISSUER = generate_issuer_keypair()
 _ISSUER_ID = "issuer-1"
 _VALIDATOR_IDS = ("v0", "v1", "v2", "v3")
 _NODES = {node_id: generate_node_keypair() for node_id in _VALIDATOR_IDS}
-_VSET = ValidatorSet(members=frozenset(_VALIDATOR_IDS), f=1)
+_VSET = ValidatorSet(members=frozenset(_VALIDATOR_IDS), n=4, f=1)
 _ATTACKER_ISSUER = generate_issuer_keypair()
 _ATTACKER_NODE = generate_node_keypair()
 _BASE_TS = 1_700_000_001_000
@@ -136,11 +142,10 @@ def _pbft_block(previous: Block, seed: int) -> Block:
   block = attach_proposer_signature(
     _candidate(previous, seed, "pbft", {"view_number": 0}), _NODES["v0"].private_key
   )
-  signatures = tuple(
-    sign_canonical(_NODES[node_id].private_key, block.preimage_dict())
-    for node_id in _VALIDATOR_IDS[:3]
+  commits = tuple(
+    sign_commit(block, node_id, _NODES[node_id].private_key) for node_id in _VALIDATOR_IDS[:3]
   )
-  return replace(block, commit_signatures=signatures)
+  return replace(block, commit_signatures=commits)
 
 
 def _build_chain(make_block, length: int = 4) -> list[Block]:
