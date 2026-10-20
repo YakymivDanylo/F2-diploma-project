@@ -40,6 +40,7 @@ from blockchain_core.keys import generate_keypair
 from blockchain_core.merkle import build_root
 from blockchain_core.validation import (
   ValidationResult,
+  pow_target,
   validate_chain,
   validate_extension,
 )
@@ -101,7 +102,7 @@ def _signed_block(
     sealed_consensus={"nonce": 0, "difficulty": 1},
     resolve_issuer_key=_resolve_issuer_key,
   )
-  return attach_proposer_signature(block, (node_key or _NODE).private_key)
+  return attach_proposer_signature(_mine(block), (node_key or _NODE).private_key)
 
 
 def _valid_chain(length: int) -> list[Block]:
@@ -116,13 +117,21 @@ def _valid_chain(length: int) -> list[Block]:
 
 
 def _validate(blocks, **overrides):
-  kwargs = {"resolve_node_key": _resolve_node_key, "resolve_issuer_key": _resolve_issuer_key}
+  kwargs = {
+    "resolve_node_key": _resolve_node_key,
+    "resolve_issuer_key": _resolve_issuer_key,
+    "expected_difficulty": 1,
+  }
   kwargs.update(overrides)
   return validate_chain(blocks, **kwargs)
 
 
 def _extend(tip, blocks, **overrides):
-  kwargs = {"resolve_node_key": _resolve_node_key, "resolve_issuer_key": _resolve_issuer_key}
+  kwargs = {
+    "resolve_node_key": _resolve_node_key,
+    "resolve_issuer_key": _resolve_issuer_key,
+    "expected_difficulty": 1,
+  }
   kwargs.update(overrides)
   return validate_extension(tip, blocks, **kwargs)
 
@@ -130,6 +139,16 @@ def _extend(tip, blocks, **overrides):
 def _rehash(block: Block, **changes) -> Block:
   changed = replace(block, **changes)
   return replace(changed, block_hash=sha256_of_canonical(changed.preimage_dict()))
+
+
+def _mine(block: Block) -> Block:
+  """Search `nonce` until block_hash meets the declared difficulty's target."""
+  difficulty = block.sealed_consensus["difficulty"]
+  nonce = 0
+  while int(block.block_hash, 16) >= pow_target(difficulty):
+    nonce += 1
+    block = _rehash(block, sealed_consensus={**block.sealed_consensus, "nonce": nonce})
+  return block
 
 
 def _reseal_with_records(block: Block, records, key=None) -> Block:
