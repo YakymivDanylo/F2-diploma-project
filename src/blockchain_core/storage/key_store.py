@@ -15,8 +15,13 @@ import os
 import secrets
 from pathlib import Path
 
+from cryptography.exceptions import UnsupportedAlgorithm
+
 from ..keys import (
+  IssuerKeyPair,
   KeyPair,
+  NodeKeyPair,
+  PrivateKey,
   algorithm_of,
   private_key_from_pem,
   private_key_to_pem,
@@ -34,6 +39,14 @@ class KeyStoreMissingError(FileNotFoundError):
 
 class KeyStoreCorruptedError(ValueError):
   """Raised when a key-store file exists but cannot be parsed as a valid private key."""
+
+
+class IssuerKeyUnavailableError(KeyStoreMissingError):
+  """Raised at startup when the IssuerKeyPair store is missing - never silently regenerated."""
+
+
+class NodeKeyUnavailableError(KeyStoreMissingError):
+  """Raised at startup when the NodeKeyPair store is missing - never silently regenerated."""
 
 
 def _write_file(path: Path, data: bytes, mode: int, *, force: bool) -> None:
@@ -73,17 +86,38 @@ def save_key_pair(key_pair: KeyPair, path: str | Path, *, force: bool = False) -
   _write_file(public_path, public_key_to_pem(key_pair.public_key), 0o644, force=force)
 
 
-def load_key_pair(path: str | Path) -> KeyPair:
-  """Load a KeyPair from its private-key store file; derives the public key from it."""
+def _read_private_key(path: str | Path, missing: KeyStoreMissingError) -> PrivateKey:
   private_path = Path(path)
   if not private_path.exists():
-    raise KeyStoreMissingError(f"key store not found at {private_path}")
+    raise missing
   try:
-    private_key = private_key_from_pem(private_path.read_bytes())
-  except ValueError as exc:
+    return private_key_from_pem(private_path.read_bytes())
+  except (ValueError, TypeError, UnsupportedAlgorithm) as exc:
+    # TypeError: an encrypted PEM; UnsupportedAlgorithm: a key type cryptography rejects.
     raise KeyStoreCorruptedError(f"key store at {private_path} is corrupted: {exc}") from exc
-  return KeyPair(
-    algorithm=algorithm_of(private_key),
-    private_key=private_key,
-    public_key=private_key.public_key(),
-  )
+
+
+def load_key_pair(path: str | Path) -> KeyPair:
+  """Load a KeyPair from its private-key store file; derives the public key from it."""
+  key = _read_private_key(path, KeyStoreMissingError(f"key store not found at {path}"))
+  return KeyPair(algorithm=algorithm_of(key), private_key=key, public_key=key.public_key())
+
+
+def load_issuer_key_pair(path: str | Path) -> IssuerKeyPair:
+  """Load the node's IssuerKeyPair; a missing store fails fast and is never regenerated.
+
+  Regenerating would silently break issuer identity for every record issued before.
+  """
+  missing = IssuerKeyUnavailableError(f"issuer key material unavailable: no key store at {path}")
+  key = _read_private_key(path, missing)
+  return IssuerKeyPair(algorithm=algorithm_of(key), private_key=key, public_key=key.public_key())
+
+
+def load_node_key_pair(path: str | Path) -> NodeKeyPair:
+  """Load the node's NodeKeyPair; a missing store fails fast and is never regenerated.
+
+  Regenerating would change the node's identity and orphan its earlier proposer signatures.
+  """
+  missing = NodeKeyUnavailableError(f"node key material unavailable: no key store at {path}")
+  key = _read_private_key(path, missing)
+  return NodeKeyPair(algorithm=algorithm_of(key), private_key=key, public_key=key.public_key())
