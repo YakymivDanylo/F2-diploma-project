@@ -12,7 +12,6 @@
 | --- | --- | --- |
 | [0_intro.md](0_intro.md) | Вступ | Актуальність, об'єкт, предмет, мета та завдання роботи |
 | [1_analysis.md](1_analysis.md) | Розділ 1 | Аналіз систем-аналогів, модель As-Is, модель To-Be, Core Features, NFRs |
-| [chapter1_full.md](chapter1_full.md) | Розділ 1 (зведений) | Монолітний текст Розділу 1 (підрозділи 1.1–1.5, висновки) |
 | [2_design.md](2_design.md) | Розділ 2 | Архітектура системи: модель C4, діаграми UML, структури даних |
 | [3_implementation.md](3_implementation.md) | Розділ 3 | Програмна реалізація, інтерфейс, тестування, розгортання |
 | [4_conclusions.md](4_conclusions.md) | Висновки | Загальні висновки за результатами роботи |
@@ -20,7 +19,6 @@
 ## Хмарний документ Розділу 1
 
 - Google Docs (режим «Can comment»): [F2_Diploma_Chapter1_Yakymiv](https://docs.google.com/document/d/1i1y4k1f5iZ1DZ0fJhtl0iodUdoenCtWz/edit?usp=sharing)
-- Зведений Markdown-варіант у репозиторії: [chapter1_full.md](chapter1_full.md)
 
 ## Матриця нефункціональних вимог (NFRs)
 
