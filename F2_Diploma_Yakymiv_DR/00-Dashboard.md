@@ -17,6 +17,8 @@
 ## Навігація
 
 - [[04-Thesis-Proposal|Thesis Proposal]]
+- [[07-Scientific-Apparatus|Науковий апарат проєкту]]
+- [[09-Domain-Analysis|Аналіз предметної області та вимоги]]
 - [[05-AI-Insights|AI Insights]]
 - [[06-Supervisor-Feedback|Supervisor Feedback]]
 
