@@ -2,7 +2,7 @@
 
 > Based on [PRD](../PRD.md) and [Use Cases](../use-cases/consensus_network_use_cases.md)
 
-This document covers the multi-node network layer: peer registration/discovery, REST chain synchronization, WebSocket block/PBFT-message broadcast, PoW and PBFT consensus, and docker-compose deployment (PRD Epic 3). Every UC scenario in `consensus_network_use_cases.md` (v1.3) is mapped below. Given this thesis's central contribution, extra weight is given to: the `ValidatorSet` vs. `PeerInfo` separation (Sybil-registering extra peers must NOT inflate quorum), the PBFT quorum-counting rule (primary's own pre-prepare counts toward its own prepare), the simplified round-robin view-change, the PoW-only fork tie-break (a same-height PBFT fork is a Byzantine event, never silently resolved), full chain revalidation on divergent-fork sync vs. incremental on strict extension, `GET /node/info`'s incrementally-updated validity cache, and the error envelope / input validation / CORS / pagination cross-cutting requirements.
+This document covers the multi-node network layer: peer registration/discovery, REST chain synchronization, WebSocket block/PBFT-message broadcast, PoW and PBFT consensus, and docker-compose deployment (PRD Epic 3). Every UC scenario in `consensus_network_use_cases.md` is mapped below: UC-1 to UC-14 and the cross-cutting section (v1.3) as `TC-<uc>.<n>` / `TC-EV.<n>`, and, added for v1.8 / PRD v1.9, UC-15 (`RecordForwarder` and HTTP mapping), UC-16 (`forward_record` channel on `WS /ws/pbft`) and UC-17 (`ChainState` append vs replace) as `CN-TC-15.<n>`, `CN-TC-16.<n>`, `CN-TC-17.<n>` in sections 16 to 18. The `CN-` prefix is used for the v1.8 additions so that cross-document references from `nfr_operations_test_cases.md` (which uses `NF-TC-`) are unambiguous; existing `TC-` IDs are unchanged. A coverage matrix and totals are in section 19. Given this thesis's central contribution, extra weight is given to: the `ValidatorSet` vs. `PeerInfo` separation (Sybil-registering extra peers must NOT inflate quorum), the PBFT quorum-counting rule (primary's own pre-prepare counts toward its own prepare), the simplified round-robin view-change, the PoW-only fork tie-break (a same-height PBFT fork is a Byzantine event, never silently resolved), full chain revalidation on divergent-fork sync vs. incremental on strict extension, `GET /node/info`'s incrementally-updated validity cache, and the error envelope / input validation / CORS / pagination cross-cutting requirements.
 
 ---
 
@@ -223,3 +223,118 @@ This document covers the multi-node network layer: peer registration/discovery, 
 | TC-EV.3 | FR-19 | Submit `DocumentRecord.metadata` at, just under, and just over the server-enforced max byte-length cap | Within-limit accepted; over-limit rejected with a validation error |
 | TC-EV.4 | NFR (CORS) | Send a cross-origin request from Epic 4's configured frontend origin, and separately from an unconfigured origin | Configured origin is allowed; CORS is tunable per environment (dev/demo) via config, not hardcoded to one origin |
 | TC-EV.5 | FR-18 | Call `GET /chain` with no pagination parameters on a chain longer than the server's max page size | Never returns an unbounded full-chain dump; response is capped at the server-enforced max page size |
+
+---
+
+## 16. `RecordForwarder` and Reply-Code-to-HTTP Mapping (UC-15; plan Slice 13; PRD FR-22 (i)-(iv), (vi), (viii), (ix), (x))
+
+Mapping tests run against a stub `RecordForwarder`; the real channel is exercised in section 17. The closed reply-code enum is `accepted | duplicate | not_primary | not_validator | unregistered_issuer | invalid_record | auth_failed`.
+
+| # | Use Case | Test Case | Expected Result |
+|---|----------|-----------|-----------------|
+| CN-TC-15.1 | UC-15 primary | `POST /documents` with a valid `{hash, metadata}` to a non-primary; stub forwarder replies `accepted` | Node signs the record, takes the submission lock for check-sign-queue, RELEASES it before forwarding; forwarder generates a unique UUID `request_id` and awaits one reply; handler returns the normal accepted acknowledgement with the same status and body as a primary-received request; `issuer_id`/`signature` unchanged |
+| CN-TC-15.2 | UC-15-A1 | Single parameterised mapping test iterating every row of the UC-15-A1 table (7 reply codes, view change, timeout, connection failure) | Every row asserted; a new outcome added without a table row fails the test; every non-ack row uses the FR-19 envelope |
+| CN-TC-15.3 | UC-15-A1 (`accepted`) | Stub returns `accepted` | Normal accepted acknowledgement (same status and body as a primary-received request) |
+| CN-TC-15.4 | UC-15-A1 (`duplicate`) | Stub returns `duplicate` | 409 Conflict in the envelope |
+| CN-TC-15.5 | UC-15-A1 (`not_primary`) | Stub returns `not_primary` | 503 with `Retry-After`, error code `not_primary` |
+| CN-TC-15.6 | UC-15-A1 (view change) | Node is in a view change / has no current primary when `POST /documents` arrives | 503 with `Retry-After`; no local queuing, no deferred processing |
+| CN-TC-15.7 | UC-15-A1 (timeout) | Stub never replies within `FORWARD_ACK_TIMEOUT_MS` | 503 with `Retry-After`, error code `forward_timeout` |
+| CN-TC-15.8 | UC-15-A1 (connection failure) | Stub raises a forwarding connection failure | 503 with `Retry-After` |
+| CN-TC-15.9 | UC-15-A1 (`unregistered_issuer`) | Stub returns `unregistered_issuer` | 403 in the envelope |
+| CN-TC-15.10 | UC-15-A1 (`invalid_record`) | Stub returns `invalid_record` | 422 in the envelope |
+| CN-TC-15.11 | UC-15-A1 (`not_validator`) | Stub returns `not_validator` | 502 in the envelope (server-side fault, not a client error) |
+| CN-TC-15.12 | UC-15-A1 (`auth_failed`) | Stub returns `auth_failed` | 502 in the envelope |
+| CN-TC-15.13 | UC-15-A2 | `POST /documents` arrives at the current primary | `RecordForwarder` is not invoked; no `request_id` generated; no reply awaited; record queued locally |
+| CN-TC-15.14 | UC-15-A3 | Stub returns `not_primary`; count forward calls; client retries after `Retry-After` | No automatic re-forward on the first request (exactly one forward call); the retry is forwarded afresh to the then-current primary |
+| CN-TC-15.15 | UC-15-A4 | Boot with `FORWARD_ACK_TIMEOUT_MS=500`, then unset | 500 is used by the forwarder (timeout fires at 500 ms); effective value logged at boot; default 2000 when unset |
+| CN-TC-15.16 | UC-15-E1 | Boot with `FORWARD_ACK_TIMEOUT_MS` = `0`, `-1`, `abc`, empty | Node fails fast at startup with a clear configuration error naming the key; no silent fallback to a default |
+| CN-TC-15.17 | UC-15-E1 (boundary) | Boot with `FORWARD_ACK_TIMEOUT_MS=1` and with the default | Both accepted |
+| CN-TC-15.18 | UC-15-E2 | Primary queues the record but the reply is lost; client gets 503 then retries the same hash | First request: 503 `forward_timeout`; retry receives `duplicate` (409), never a second queued copy |
+| CN-TC-15.19 | UC-15-E3 | Primary unreachable: connection refused, connection reset, no established `WS /ws/pbft` | 503 with `Retry-After` in each case; nothing silently dropped; nothing queued twice |
+| CN-TC-15.20 | UC-15-E4 | Reply arrives after the timeout already produced the 503 | Reply discarded by `request_id` (no pending request); the response already sent is not altered |
+| CN-TC-15.21 | UC-15-E5 | Forwarder reply parser receives codes outside the enum (`queued`, `ACCEPTED`, empty, null) | HTTP 502 in the envelope; event logged without key material; never treated as acceptance |
+| CN-TC-15.22 | UC-15-E6 | Inspect every non-acknowledgement response of the mapping | Body is `{"error": {"code", "message", "details"}}`; every 503 carries a positive-integer `Retry-After` |
+| CN-TC-15.23 | UC-15-EC1 (concurrency) | Slow stub (several seconds) pending; meanwhile submit a different hash; then a second submission of the SAME hash | The different hash completes normally (lock released before the await); the same-hash submission is rejected by the local pending-hash check or reaches the primary as `duplicate`; never queued twice |
+| CN-TC-15.24 | UC-15-EC2 | Reply delivered just inside, then just outside, `FORWARD_ACK_TIMEOUT_MS` (injected clock) | Inside: the mapped response of its code; outside: 503 `forward_timeout` |
+| CN-TC-15.25 | UC-15-EC3 | Reply carrying an unknown `request_id` while a request is pending | Dropped; the pending `POST /documents` is unaffected |
+| CN-TC-15.26 | UC-15-EC4 | Submit a hash already finalized, and one already pending in a mempool seeded while the node was primary in an earlier view (the state remains after the node loses primacy; a non-primary never queues, FR-22 (x)) | Rejected 409 locally (UC-4-E6) before any forward; the forwarder is not called |
+| CN-TC-15.27 | UC-15 side effects / FR-22 (x) | Run each mapped outcome; inspect the non-primary's own mempool and pending-request table | A non-primary never places a forwarded or locally produced record in its own mempool (size unchanged for every outcome, including `accepted`); one pending-request entry per in-flight forward, removed on reply or timeout |
+
+---
+
+## 17. `forward_record` Channel on `WS /ws/pbft` (UC-16; plan Slice 17b; PRD FR-22 (i)-(x))
+
+Real channel between a non-primary (sender) and the primary. Check order (the code returned is that of the first failing check): 1a `auth_failed`, 1b `not_validator`, 2 `not_primary`, 3 `invalid_record` (shape), 4 `unregistered_issuer` (added by Epic 6, Slice 31), 5 `invalid_record` (record signature), 6 `duplicate`, 7 queue and `accepted`. The check-4 cases are verified by `nfr_operations_test_cases.md` (NF-TC-4.x) once Slice 31 lands.
+
+| # | Use Case | Test Case | Expected Result |
+|---|----------|-----------|-----------------|
+| CN-TC-16.1 | UC-16 primary | n = 4 PBFT: non-primary N2 signs a record and sends `forward_record` with a fresh `request_id`; primary runs checks 1a to 6 | Primary queues the record and replies `accepted`; N2 returns the normal acknowledgement; record included in the next proposal and finalized exactly once in exactly one block; `issuer_id` and `signature` are those fixed by N2 |
+| CN-TC-16.2 | UC-16 primary (message contract) | Inspect request and reply for a forward; record timing of the reply versus block finalization | `request_id` is a UUID generated per request and echoed in the reply; exactly one `forward_record_reply {request_id, code}` is sent, after the accept/reject decision and BEFORE finalization |
+| CN-TC-16.3 | UC-16-A1 | `POST /documents` to the primary | No `forward_record` sent and no reply generated; primary signs and queues directly |
+| CN-TC-16.4 | UC-16-A2 (concurrency) | N2 and N3 receive the same `hash` and forward concurrently; repeat for both arrival orders | Exactly one `accepted` and one `duplicate` (-> 409); mempool holds exactly one entry; exactly one block eventually contains the hash |
+| CN-TC-16.5 | UC-16-A3 | `forward_record` arrives at a node during a view change; `POST /documents` arrives at a non-primary with no established primary | Receiver replies `not_primary` (sender does not forward into the void); both map to 503 with `Retry-After`; nothing queued |
+| CN-TC-16.6 | UC-16-A3 | View change begins after the forward was sent and before the reply; then new primary is elected and the client retries | Outcome is `not_primary` or timeout, both 503 with `Retry-After`; retry is forwarded and accepted; hash appears exactly once in one finalized block; no record lost silently |
+| CN-TC-16.7 | UC-16-A4 | Sender forwards to a node that is no longer (or not yet) primary | Node does not queue; replies `not_primary`; no automatic re-forward; client retry reaches the new primary |
+| CN-TC-16.8 | UC-16-A5 | The same `forward_record` (same `document_hash`) delivered twice | Queued exactly once; second delivery gets `duplicate` (-> 409); mempool has one entry |
+| CN-TC-16.9 | UC-16-E1 | Message claims a `ValidatorSet` member's `sender_id` with `sender_signature` missing | Reply `auth_failed`; nothing queued; original `POST /documents` gets 502 |
+| CN-TC-16.10 | UC-16-E1 (auth boundary) | Claimed validator `sender_id` with a signature that does not verify (wrong key, or record altered after signing) | Reply `auth_failed`; sender not treated as that validator; nothing queued |
+| CN-TC-16.11 | UC-16-E2 (auth boundary) | Valid signature from a peer registered only via `POST /peers/register` (not in `ValidatorSet`) | Reply `not_validator`; nothing queued; later checks not reached; original request gets 502 |
+| CN-TC-16.12 | UC-16-E3 | Observe the full HTTP path of a `not_primary` reply (stale view and view change) | 503 with `Retry-After` on the original `POST /documents` in the envelope |
+| CN-TC-16.13 | UC-16-E4 | Forward records with missing `issuer_id`, malformed hash, oversized metadata (three cases) | Reply `invalid_record` before any later check; original request gets 422; nothing queued |
+| CN-TC-16.14 | UC-16-E5 | Well-formed record whose signature does not verify against the issuer key | `invalid_record`; nothing queued; 422 |
+| CN-TC-16.15 | UC-16-E5 (pre/post Epic 6) | Forward a record whose `issuer_id` is unknown to the resolver | Before Slice 31: `invalid_record` (resolver miss); after Slice 31: `unregistered_issuer` (this test is updated by Slice 31; see NF-TC-4.6) |
+| CN-TC-16.16 | UC-16-E6 | Forward a hash already in a finalized block (replay by a slow forwarder) | `duplicate` (-> 409); not included in a second block |
+| CN-TC-16.17 | UC-16-E6 | Forward a hash already in the primary's mempool | `duplicate` (-> 409); mempool unchanged |
+| CN-TC-16.18 | UC-16-E7 | Reply arrives after the sender's `FORWARD_ACK_TIMEOUT_MS`; also a reply with a never-issued `request_id` | Sender discards both (no pending `request_id`); the already-sent 503 is unchanged |
+| CN-TC-16.19 | UC-16-E8 | Drive the primary handler over a corpus covering every check outcome (and fuzzed messages) | Every `forward_record_reply.code` produced is one of the seven enumerated values; any other value fails the test |
+| CN-TC-16.20 | UC-16-E9 (pair 1a/1b) | Invalid signature from a non-member | `auth_failed`, not `not_validator` |
+| CN-TC-16.21 | UC-16-E9 (pair 1b/2) | Non-validator sender delivering to a non-primary | `not_validator`, not `not_primary` |
+| CN-TC-16.22 | UC-16-E9 (pair 2/3) | Non-primary receives a malformed record | `not_primary`, not `invalid_record` |
+| CN-TC-16.23 | UC-16-E9 (pair 3/5, before Epic 6) | Malformed record with an unknown issuer | `invalid_record` (shape check wins; resolver not consulted) |
+| CN-TC-16.24 | UC-16-E9 (pair 3/4, once Epic 6 exists) | Malformed record with an unregistered issuer | `invalid_record`, not `unregistered_issuer`; owned by Slice 31 and verified by NF-TC-4.7 |
+| CN-TC-16.25 | UC-16-E9 (pair 5/6) | Bad-signature record for a hash already pending | `invalid_record`, not `duplicate` |
+| CN-TC-16.26 | UC-16-E9 (pair 6/7) | Valid record for a duplicate hash, then a valid fresh hash | Duplicate: `duplicate` and not queued again; fresh: queued and `accepted` |
+| CN-TC-16.27 | UC-16-EC1 | After each non-`accepted` code, submit the same `document_hash` again with a valid record | Later submission succeeds; no mempool entry or duplicate-hash lock left by the rejected attempt |
+| CN-TC-16.28 | UC-16-EC2 | Send repeated rejected forwards from the same sender on one connection | Each gets a reply; `WS /ws/pbft` stays open; rejections logged without key material |
+| CN-TC-16.29 | UC-16-EC3 | Receiver emits a duplicated reply for one `request_id` | Each `request_id` gets exactly one reply; the sender ignores the duplicate |
+| CN-TC-16.30 | UC-16-EC4 (concurrency) | Concurrent forwards and a primary-local `POST /documents` for the same hash | Duplicate check plus queue is atomic: exactly one succeeds, others get `duplicate`/409 |
+| CN-TC-16.31 | UC-16-EC5 | Inspect `sender_id` on all normal-path forwards | Never equal to the receiver's own `node_id`; the primary never forwards to itself |
+| CN-TC-16.32 | UC-16 side effects / FR-22 (x) | Forward via N2 (accepted, rejected, timed out) and inspect N2's mempool; submit during a view change | N2 never queues a forwarded or local record (mempool unchanged); a request during a view change gets 503 with `Retry-After`, with no queuing and no deferred processing; a `forward_record` sent to a non-primary is answered `not_primary` and not queued |
+| CN-TC-16.33 | UC-16 (mode scope) | Send a `forward_record` to a PoW-mode node | No intake channel exists in PoW mode; message rejected/ignored without state change (consistent with UC-11-EC1) |
+| CN-TC-16.34 | UC-16-E9 (pair 4/5, once Epic 6 exists) | Record with an unregistered `issuer_id` AND a signature that does not verify | `unregistered_issuer`, not `invalid_record`. Gated: applies once Epic 6 (plan Slice 31b) exists; owned by Slice 31b |
+
+---
+
+## 18. `ChainState` Append vs Chain-Sync Replace (UC-17; plan Slice 16; PRD FR-27)
+
+| # | Use Case | Test Case | Expected Result |
+|---|----------|-----------|-----------------|
+| CN-TC-17.1 | UC-17 primary | `ChainState.replace(longer_valid_chain)` holds the lock; call `append(block)` meanwhile | Append waits for the lock; after the replace it runs against the NEW tip: appended if it extends it, else rejected as not extending the tip and node falls back to chain sync (UC-7-E2) |
+| CN-TC-17.2 | UC-17 postconditions | Validate the final chain with the full Epic 2 checklist; compare persisted chain and validity cache | Chain valid; no append lost or interleaved with a replace; chain is wholly old-plus-appends or wholly new-plus-appends; cache and persisted chain match |
+| CN-TC-17.3 | UC-17 side effects | Replace while mining / a PBFT round is in progress | Round abandoned and restarted against the adopted chain (UC-3-EC2); validity cache updated |
+| CN-TC-17.4 | UC-17-A1 (concurrency) | Append acquires the lock first, then replace installs the longer chain | Append completes on the old chain; replace then installs the new chain, dropping the appended block if it is not on it; cache and persisted chain match the new chain |
+| CN-TC-17.5 | UC-17-A2 (concurrency) | Two valid blocks for the same height arrive together | Lock serialises: first appended, second rejected as not extending the tip |
+| CN-TC-17.6 | UC-17-A3 | Refresh the `GET /node/info` validity cache while a replace is in progress | Reader obtains a consistent view from `ChainState`; never sees a half-installed chain |
+| CN-TC-17.7 | UC-17-E1 | Replace with a chain that fails validation while an append is queued | Lock released; local chain untouched; the append is processed against the unchanged chain |
+| CN-TC-17.8 | UC-17-E2 | Inject an exception inside `append` | Lock released (context manager); chain in last consistent state; later appends do not deadlock |
+| CN-TC-17.9 | UC-17-E2 | Inject an exception inside `replace` | Same: lock released, chain unchanged/consistent, later operations proceed |
+| CN-TC-17.10 | UC-17-EC1 (Epic 3 gate, concurrency) | `tests/node/test_chain_state_concurrency.py`: append while a replace is in progress, both orderings and many interleavings (fixed seeds) | Resulting chain passes the Epic 2 validation checklist and no append is lost or interleaved, in every ordering |
+| CN-TC-17.11 | UC-17-EC2 (single-owner static check) | Static check over `src/node/**` for chain-list mutation (append, insert, extend, item assignment, deletion, rebinding) outside `ChainState`; positive control module that mutates the chain | Control fails the check; real tree passes; Slices 14, 15, 17, 17b reference `ChainState` and define no chain-mutating code |
+| CN-TC-17.12 | UC-17-EC2 (single lock) | Static check counting locks guarding append/replace | Exactly one lock exists (owned by `ChainState`); no other module defines its own chain lock |
+| CN-TC-17.13 | UC-17-EC3 | Take blocks from `ChainState`, then append and replace; attempt mutation of a returned block | Returned blocks are frozen `Block` objects or deep copies: mutation raises or leaves the live chain unchanged; an earlier copy is unaltered by later append or replace |
+| CN-TC-17.14 | UC-17-EC4 | Review Epic 3 gate scope and `ChainState` API | The Epic 3 concurrency test covers append vs replace only; no snapshot operation or second lock exists at the Epic 3 gate; the three-way test is NF-TC-11.11 (Epic 6, Slice 33) |
+
+---
+
+## 19. Coverage Matrix and Totals (v1.8 additions)
+
+| Use case | Scenarios | Test cases | Count |
+|---|---|---|---|
+| UC-15 | primary, A1-A4, E1-E6, EC1-EC4, plus FR-22 (x) side-effect | CN-TC-15.1 to 15.27 | 27 |
+| UC-16 | primary, A1-A5, E1-E9 (E9 as 8 pair tests), EC1-EC5, plus FR-22 (x) and PoW mode scope | CN-TC-16.1 to 16.34 | 34 |
+| UC-17 | primary, A1-A3, E1-E2, EC1-EC4, plus postconditions and side effects | CN-TC-17.1 to 17.14 | 14 |
+| **New total** | | | **75** |
+
+Totals for the whole file: 115 existing cases (`TC-1.1` to `TC-14.8` plus `TC-EV.1` to `TC-EV.5`, unchanged and not renumbered) + 75 new = **190** test cases.
+
+Cross-references: E6-UC-4 flows moved to Epic 3 map to CN-TC-15.x / 16.x (see the pointer table in `nfr_operations_test_cases.md`); the snapshot-copy extension of CN-TC-17.10 is NF-TC-11.11; check 4 (`unregistered_issuer`) of the handler order is verified by NF-TC-4.6 to NF-TC-4.8.
