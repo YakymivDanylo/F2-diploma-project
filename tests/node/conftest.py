@@ -19,9 +19,11 @@ def node_env(tmp_path: Path) -> NodeEnv:
   save_key_pair(node_key, tmp_path / "keys" / "node.pem")
   save_key_pair(issuer_key, tmp_path / "keys" / "issuer.pem")
   validators = [{"node_id": "node1", "public_key": pem_of(node_key), "retired_at": None}]
+  validator_keys = {"node1": node_key}
   for i in range(2, 5):
+    validator_keys[f"node{i}"] = generate_node_keypair()
     validators.append(
-      {"node_id": f"node{i}", "public_key": pem_of(generate_node_keypair()), "retired_at": None}
+      {"node_id": f"node{i}", "public_key": pem_of(validator_keys[f"node{i}"]), "retired_at": None}
     )
   (tmp_path / "validators.json").write_text(
     json.dumps({"n": 4, "f": 1, "validators": validators}), encoding="utf-8"
@@ -41,7 +43,13 @@ def node_env(tmp_path: Path) -> NodeEnv:
     "ISSUERS_PATH": str(tmp_path / "issuers.json"),
     "INIT_CHAIN": "1",
   }
-  return NodeEnv(root=tmp_path, env=env, node_key=node_key, issuer_key=issuer_key)
+  return NodeEnv(
+    root=tmp_path,
+    env=env,
+    node_key=node_key,
+    issuer_key=issuer_key,
+    validator_keys=validator_keys,
+  )
 
 
 @pytest.fixture

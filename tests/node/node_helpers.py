@@ -16,6 +16,7 @@ class NodeEnv:
   env: dict[str, str]
   node_key: NodeKeyPair
   issuer_key: IssuerKeyPair
+  validator_keys: dict[str, NodeKeyPair]  # node1..node4; node1 is node_key
 
   @property
   def validators_path(self) -> Path:

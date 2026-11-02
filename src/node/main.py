@@ -17,17 +17,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from blockchain_core import JsonChainStore, NodeState, public_key_to_pem, restore_node_state
-from blockchain_core.keys import KeyResolver, PublicKey
+from blockchain_core.keys import PublicKey
+from node.api.node_info import router as node_info_router
 from node.config import NodeConfig, load_config
 from node.errors import install_error_handlers
+from node.key_resolver import CombinedKeyResolver, ResolverHolder
 from node.registries import (
   IssuerRegistry,
-  KeyEntry,
   ValidatorRegistry,
   active_entry,
   load_issuer_registry,
   load_validator_registry,
 )
+from node.validity_cache import ChainValidator, ValidityCache
 
 logger = logging.getLogger("node")
 
@@ -43,16 +45,9 @@ class NodeContext:
   issuers: IssuerRegistry
   store: JsonChainStore
   state: NodeState
-
-
-def _current_key_resolver(entries: tuple[KeyEntry, ...]) -> KeyResolver:
-  """Interim resolver: the active key regardless of timestamp (Slice 11 makes it time-aware)."""
-  keys = {e.identity: e.public_key for e in entries if e.retired_at is None}
-
-  def resolve(identity: str, at_timestamp: int) -> PublicKey | None:
-    return keys.get(identity)
-
-  return resolve
+  resolvers: ResolverHolder
+  validator: ChainValidator
+  validity_cache: ValidityCache
 
 
 def _same_key(a: PublicKey, b: PublicKey) -> bool:
@@ -87,16 +82,19 @@ def build_node_context(config: NodeConfig) -> NodeContext:
   )
   logger.info("IssuerRegistry loaded: issuer_ids=%s", sorted({e.identity for e in issuers.entries}))
   is_pow = config.consensus_mode == "pow"
+  resolvers = ResolverHolder(CombinedKeyResolver(validators, issuers))
+  resolver = resolvers.current
+  core_validator_set = None if is_pow else validators.to_core()
   store = JsonChainStore(config.chain_path)
   try:
     state = restore_node_state(
       store,
       issuer_key_path=config.issuer_key_path,
       node_key_path=config.node_key_path,
-      resolve_node_key=_current_key_resolver(validators.entries),
-      resolve_issuer_key=_current_key_resolver(issuers.entries),
+      resolve_node_key=resolver.resolve_node_key,
+      resolve_issuer_key=resolver.resolve_issuer_key,
       expected_difficulty=config.expected_difficulty if is_pow else None,
-      validator_set=None if is_pow else validators.to_core(),
+      validator_set=core_validator_set,
       allow_fresh=config.init_chain,
     )
     _cross_check_keys(config, validators, issuers, state)
@@ -106,8 +104,22 @@ def build_node_context(config: NodeConfig) -> NodeContext:
   if not state.restored.valid:
     logger.error("persisted chain is INVALID: %s", state.restored.validation)
   logger.info("node %s started in %s mode", config.node_id, config.consensus_mode)
+  validator = ChainValidator(
+    resolvers,
+    expected_difficulty=config.expected_difficulty if is_pow else None,
+    validator_set=core_validator_set,
+  )
+  validity_cache = ValidityCache(validator)
+  validity_cache.initialize(state.restored.blocks, state.restored.validation)
   return NodeContext(
-    config=config, validators=validators, issuers=issuers, store=store, state=state
+    config=config,
+    validators=validators,
+    issuers=issuers,
+    store=store,
+    state=state,
+    resolvers=resolvers,
+    validator=validator,
+    validity_cache=validity_cache,
   )
 
 
@@ -122,6 +134,7 @@ def create_app(config: NodeConfig) -> FastAPI:
   app = FastAPI(title="Document verification node", lifespan=lifespan)
   app.state.context = context
   install_error_handlers(app)
+  app.include_router(node_info_router)
   app.add_middleware(
     CORSMiddleware,
     allow_origins=list(config.cors_origins),
