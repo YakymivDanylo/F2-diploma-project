@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "Decentralized document verification system on a custom blockchain"
 requires-python = ">=3.11"
 dependencies = [
-  "cryptography>=42.0"
+  "cryptography>=42.0",
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+  "pydantic>=2.6",
 ]
 
 [project.optional-dependencies]
@@ -16,6 +19,7 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
     "mypy>=1.10",
+    "httpx>=0.27",
 ]
 
 [tool.pytest.ini_options]
@@ -36,7 +40,7 @@ strict = true
 packages = ["blockchain_core"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/blockchain_core"]
+packages = ["src/blockchain_core", "src/node"]
 
 [tool.pyright]
 venvPath = "."
