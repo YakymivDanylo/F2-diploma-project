@@ -1,7 +1,7 @@
 # Implementation Plan — Decentralized Document Verification System
 
 **Project:** Дипломна робота — «Децентралізована система верифікації документів на основі власної реалізації блокчейн-технології»
-**Source documents:** [PRD v1.9 (Epics 1–5 architecture-approved at v1.3; Epic 6 under review)](PRD.md); Use Cases: [NFR & Operations (Epic 6)](use-cases/nfr_operations_use_cases.md), [Blockchain Core](use-cases/blockchain_core_use_cases.md), [Consensus & Network](use-cases/consensus_network_use_cases.md), [Web Interface](use-cases/web_interface_use_cases.md), [Attack Resistance Testing](use-cases/attack_resistance_testing_use_cases.md); QA Test Cases: [Blockchain Core](qa/blockchain_core_test_cases.md), [Consensus & Network](qa/consensus_network_test_cases.md), [Web Interface](qa/web_interface_test_cases.md), [Attack Resistance Testing](qa/attack_resistance_testing_test_cases.md), [NFR & Operations (Epic 6)](qa/nfr_operations_test_cases.md)
+**Source documents:** [PRD v2.0 (Epics 1–5 architecture-approved at v1.3; Epic 6 architecture-approved in review round 4, 2026-10-28)](PRD.md); Use Cases: [NFR & Operations (Epic 6)](use-cases/nfr_operations_use_cases.md), [Blockchain Core](use-cases/blockchain_core_use_cases.md), [Consensus & Network](use-cases/consensus_network_use_cases.md), [Web Interface](use-cases/web_interface_use_cases.md), [Attack Resistance Testing](use-cases/attack_resistance_testing_use_cases.md); QA Test Cases: [Blockchain Core](qa/blockchain_core_test_cases.md), [Consensus & Network](qa/consensus_network_test_cases.md), [Web Interface](qa/web_interface_test_cases.md), [Attack Resistance Testing](qa/attack_resistance_testing_test_cases.md), [NFR & Operations (Epic 6)](qa/nfr_operations_test_cases.md)
 **Created:** 2026-09-07
 **Audience:** the thesis author, writing all code by hand, solo, over a multi-month timeline.
 
@@ -18,6 +18,15 @@ This is a **personal roadmap**, not an agent execution script. Slices are sized 
 
 **Wave assignment is deliberately NOT performed.** Waves exist to let parallel agents own disjoint file sets; here a single human executes strictly sequentially. Section 5 lists the few places where slices *could* be reordered or interleaved if you want variety, but the default is: top to bottom.
 
+### Slice numbering and execution order
+
+Slice IDs are **stable labels, not a sort key** — they are never renumbered, because use cases, test cases and the PRD cite them. Letter suffixes mark slices split or inserted later. The execution order is always the order of the table in section 5 (identical to the order of the slice sections in section 3), which deviates from numeric order in exactly two places:
+
+- **Epic 3 forwarding:** `16a → 16b → 17 → 18 → 17b → 19`. Slice 17 is the PBFT three-phase protocol (earlier called "17a"); `17b` (the `forward_record` channel) runs after view-change Slice 18 because its `not_primary` cases need it.
+- **Epic 6 measurement:** `34` runs before `30` (Slice 33a needs its bench smoke in CI). Order within Epic 6: `34 → 30 → 31a → 31b → 32a → 32b → 33a → 33b → 35a → 35b`.
+
+A reference to a bare "Slice 16" or "Slice 31" is stale; it must name the suffixed slice.
+
 ### ID prefix convention (important — IDs collide across documents)
 
 The four use-case files and the four QA files each restart numbering at `UC-1` / `TC-1.1`. This plan disambiguates with an epic prefix:
@@ -28,7 +37,7 @@ The four use-case files and the four QA files each restart numbering at `UC-1` /
 | `E3-UC-…` / `CN-TC-…` | `use-cases/consensus_network_use_cases.md` | `qa/consensus_network_test_cases.md` |
 | `E4-UC-…` / `WI-TC-…` | `use-cases/web_interface_use_cases.md` | `qa/web_interface_test_cases.md` |
 | `E5-UC-…` / `AT-TC-…` | `use-cases/attack_resistance_testing_use_cases.md` | `qa/attack_resistance_testing_test_cases.md` |
-| `E6-UC-…` / `NF-TC-…` | `use-cases/nfr_operations_use_cases.md` | `qa/nfr_operations_test_cases.md` (385 test cases) |
+| `E6-UC-…` / `NF-TC-…` | `use-cases/nfr_operations_use_cases.md` | `qa/nfr_operations_test_cases.md` (387 test cases) |
 
 ### TDD discipline per slice
 
@@ -48,10 +57,10 @@ For every code slice: write the listed test cases as **failing tests first**, th
 
 | Prerequisite | Status |
 |---|---|
-| **PRD** — `docs/PRD.md` | Present (v1.9). Epics 1–5 architecture-approved at v1.3; Epic 6 (NFR/operations, §6) added in v1.5–v1.9 and under architecture re-review. Covers 6 epics: §1 research, §2 blockchain core, §3 consensus & network, §4 React UI, §5 attack resistance, §6 NFR & operations. |
+| **PRD** — `docs/PRD.md` | Present (v2.0). Epics 1–5 architecture-approved at v1.3; Epic 6 (NFR/operations, §6) added in v1.5–v1.9 and architecture-approved in review round 4 (2026-10-28). Covers 6 epics: §1 research, §2 blockchain core, §3 consensus & network, §4 React UI, §5 attack resistance, §6 NFR & operations. |
 | **Use cases** | Present, 5 files. `blockchain_core_use_cases.md` — 9 top-level UCs (UC-1…UC-9); `consensus_network_use_cases.md` — 17 UCs (UC-1…UC-17; UC-15…17 added for forwarding and `ChainState`); `web_interface_use_cases.md` — 9 UCs; `attack_resistance_testing_use_cases.md` — 8 UCs; `nfr_operations_use_cases.md` — 30 UCs (E6-UC-1…30). **73 top-level scenarios** plus alternative/error/edge sub-flows. |
-| **QA test cases** | Present, 5 files. `blockchain_core_test_cases.md` — 108 TCs; `consensus_network_test_cases.md` — 189 TCs (includes CN-TC-15/16/17 = 74 new cases for forwarding, the `forward_record` channel and `ChainState`); `web_interface_test_cases.md` — 48 TCs; `attack_resistance_testing_test_cases.md` — 51 TCs; `nfr_operations_test_cases.md` (Epic 6) — 385 TCs (NF-TC, new file). **≈781 test cases total.** |
-| **Architecture review** | **PASS.** PRD v1.2 passed the second review round with 5 sentence-level polish items; v1.3 applies them and is marked "FINAL, architecture-approved" with no further review round required. Security-priority list carried into this plan's `Pre-review` flags. **Epic 6:** architecture review rounds 1–3 returned FAIL; the resolutions are recorded in the Epic 6 header, and the current verdict is not recorded here (see Epic 6 Review notes, item 7). |
+| **QA test cases** | Present, 5 files. `blockchain_core_test_cases.md` — 136 TCs; `consensus_network_test_cases.md` — 190 TCs (includes CN-TC-15/16/17 = 74 new cases for forwarding, the `forward_record` channel and `ChainState`); `web_interface_test_cases.md` — 48 TCs; `attack_resistance_testing_test_cases.md` — 51 TCs; `nfr_operations_test_cases.md` (Epic 6) — 387 TCs (NF-TC, new file). **≈812 test cases total.** |
+| **Architecture review** | **PASS.** PRD v1.2 passed the second review round with 5 sentence-level polish items; v1.3 applies them and is marked "FINAL, architecture-approved" with no further review round required. Security-priority list carried into this plan's `Pre-review` flags. **Epic 6:** architecture review rounds 1–3 returned FAIL; the resolutions are recorded in the Epic 6 header; round 4 returned PASS (2026-10-28, per the project scratchpad). |
 | **Existing source code** | **None.** The repository currently contains only `README.md`, `.gitignore`, and `docs/`. Every file path in this plan is therefore new; `[new]` is stated explicitly and no phantom existing paths are referenced. |
 
 ---
@@ -93,10 +102,6 @@ attacks/                          # Epic 5 — separate artifacts, own image
 results/attack_runs.csv  results/charts/
 docs/research/epic1_blockchain_comparison.md
 docs/results/findings.md
-src/node/validation_gateway.py   # Epic 3, Slice 15 (single FR-25 validation entry point; Slice 30 wraps it for blocks_rejected_total)
-src/node/chain_state.py    # Epic 3, Slice 16a (single owner + lock; Slice 33b adds the snapshot copy)
-src/node/forwarding.py     # Epic 3, Slice 13 (RecordForwarder) + 17b (WS implementation); Slice 32a verifies it uses the tls.py client factory
-src/node/consensus/pbft/forward.py   # Epic 3, Slice 17b (primary-side handler; Slice 31b adds the IssuerRegistry check)
 # Epic 6 (Slices 30–35b)
 src/node/{rate_limit,tls,snapshot_task}.py   # node-side (31a, 32a, 33b)
 src/blockchain_core/storage/snapshot.py                  # pure, no node imports (33b)
@@ -359,7 +364,7 @@ tests/{infra,benchmarks,docs}/  tests/test_layering.py
 
 ---
 
-### Slice 17: PBFT three-phase protocol — pre-prepare / prepare / commit (17a)
+### Slice 17: PBFT three-phase protocol — pre-prepare / prepare / commit
 
 - **Epic:** 3. **Depends on:** Slice 16b. **Est.:** ~2 weeks (largest single slice; flagged above 1.5 weeks and accepted — splitting the phases would leave an untestable half). The `forward_record` channel is **not** part of this slice — it is Slice 17b, placed after Slice 18 because its `not_primary` / view-change cases need view-change.
 - **Use cases:** E3-UC-6 primary (+A, B, F), quorum-scope note, E3-UC-6-E3, EC1, EC3.
@@ -544,7 +549,7 @@ tests/{infra,benchmarks,docs}/  tests/test_layering.py
 
 ## Epic 6 — Non-functional requirements and operations (added 2026-10-28)
 
-Closes the gap between Chapter 1 §1.5 (Core Features + NFR matrix, Table 1.5) and this plan: Prometheus/Grafana, API hardening, TLS 1.3, container/CI hardening, snapshots, and every measurable NFR target. **Documentation:** PRD §6 (Epic 6, FR-1…FR-23), use cases `use-cases/nfr_operations_use_cases.md` (`E6-UC-…`) and QA cases `qa/nfr_operations_test_cases.md` (`NF-TC-…`, 385 test cases). Architecture reviews rounds 1–3 returned FAIL; the decisions below are the resolutions and are binding for Slices 13, 16a/16b, 17, 17b and 30–35b. The earlier Slices 16, 31, 32, 33 and 35 are split into 16a/16b, 31a/31b, 32a/32b, 33a/33b and 35a/35b; Slice 34 is listed first and runs right after Slice 14.
+Closes the gap between Chapter 1 §1.5 (Core Features + NFR matrix, Table 1.5) and this plan: Prometheus/Grafana, API hardening, TLS 1.3, container/CI hardening, snapshots, and every measurable NFR target. **Documentation:** PRD §6 (Epic 6, FR-1…FR-23), use cases `use-cases/nfr_operations_use_cases.md` (`E6-UC-…`) and QA cases `qa/nfr_operations_test_cases.md` (`NF-TC-…`, 387 test cases). Architecture reviews rounds 1–3 returned FAIL; the decisions below are the resolutions and are binding for Slices 13, 16a/16b, 17, 17b and 30–35b. The earlier Slices 16, 31, 32, 33 and 35 are split into 16a/16b, 31a/31b, 32a/32b, 33a/33b and 35a/35b; Slice 34 is listed first and runs right after Slice 14.
 
 - **`forward_record` is built in Epic 3, not Epic 6.** Non-primary → primary forwarding of pre-signed records is a typed `forward_record` message on `WS /ws/pbft` (request id, synchronous ack with timeout, closed reply enum `accepted | duplicate | not_primary | not_validator | unregistered_issuer | invalid_record | auth_failed`, mapped to HTTP for the original `POST /documents`). **Slice 13** owns the `RecordForwarder` interface (stub, tri-state `is_primary()` seam), the HTTP mapping and a parameterised mapping test; **Slice 17b** (after view-change Slice 18) builds the real WS channel, sender authentication, record validation, dedupe, `not_primary` and late-reply discard; **Slice 31b** adds only the `IssuerRegistry` check and the `unregistered_issuer` reply. The primary's rejection is a WS reply code, not an HTTP status; the forwarding non-primary maps it to 403 on the original request. Public `POST /documents` still rejects any `signature` body with 400. In PoW mode there is no intake channel: the evidence is block-level rejection by the Epic 2 signature check when the issuer cannot be resolved.
 - **`ChainState` (single owner + one asyncio lock for append/replace/snapshot) is introduced in Slice 16a** (before sync/replace in 16b, so both operations exist behind one lock) and used by Slices 14/15 (retrofitted), 16b, 17 and 17b; Slice 33b only adds the snapshot copy (frozen blocks) under that lock. The append-during-replace concurrency tests live in Slice 16a (CN-TC-17.x).

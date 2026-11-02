@@ -264,7 +264,7 @@ Mapping tests run against a stub `RecordForwarder`; the real channel is exercise
 
 ## 17. `forward_record` Channel on `WS /ws/pbft` (UC-16; plan Slice 17b; PRD FR-22 (i)-(x))
 
-Real channel between a non-primary (sender) and the primary. Check order (the code returned is that of the first failing check): 1a `auth_failed`, 1b `not_validator`, 2 `not_primary`, 3 `invalid_record` (shape), 4 `unregistered_issuer` (added by Epic 6, Slice 31), 5 `invalid_record` (record signature), 6 `duplicate`, 7 queue and `accepted`. The check-4 cases are verified by `nfr_operations_test_cases.md` (NF-TC-4.x) once Slice 31 lands.
+Real channel between a non-primary (sender) and the primary. Check order (the code returned is that of the first failing check): 1a `auth_failed`, 1b `not_validator`, 2 `not_primary`, 3 `invalid_record` (shape), 4 `unregistered_issuer` (added by Epic 6, Slice 31b), 5 `invalid_record` (record signature), 6 `duplicate`, 7 queue and `accepted`. The check-4 cases are verified by `nfr_operations_test_cases.md` (NF-TC-4.x) once Slice 31b lands.
 
 | # | Use Case | Test Case | Expected Result |
 |---|----------|-----------|-----------------|
@@ -282,7 +282,7 @@ Real channel between a non-primary (sender) and the primary. Check order (the co
 | CN-TC-16.12 | UC-16-E3 | Observe the full HTTP path of a `not_primary` reply (stale view and view change) | 503 with `Retry-After` on the original `POST /documents` in the envelope |
 | CN-TC-16.13 | UC-16-E4 | Forward records with missing `issuer_id`, malformed hash, oversized metadata (three cases) | Reply `invalid_record` before any later check; original request gets 422; nothing queued |
 | CN-TC-16.14 | UC-16-E5 | Well-formed record whose signature does not verify against the issuer key | `invalid_record`; nothing queued; 422 |
-| CN-TC-16.15 | UC-16-E5 (pre/post Epic 6) | Forward a record whose `issuer_id` is unknown to the resolver | Before Slice 31: `invalid_record` (resolver miss); after Slice 31: `unregistered_issuer` (this test is updated by Slice 31; see NF-TC-4.6) |
+| CN-TC-16.15 | UC-16-E5 (pre/post Epic 6) | Forward a record whose `issuer_id` is unknown to the resolver | Before Slice 31b: `invalid_record` (resolver miss); after Slice 31b: `unregistered_issuer` (this test is updated by Slice 31b; see NF-TC-4.6) |
 | CN-TC-16.16 | UC-16-E6 | Forward a hash already in a finalized block (replay by a slow forwarder) | `duplicate` (-> 409); not included in a second block |
 | CN-TC-16.17 | UC-16-E6 | Forward a hash already in the primary's mempool | `duplicate` (-> 409); mempool unchanged |
 | CN-TC-16.18 | UC-16-E7 | Reply arrives after the sender's `FORWARD_ACK_TIMEOUT_MS`; also a reply with a never-issued `request_id` | Sender discards both (no pending `request_id`); the already-sent 503 is unchanged |
@@ -291,7 +291,7 @@ Real channel between a non-primary (sender) and the primary. Check order (the co
 | CN-TC-16.21 | UC-16-E9 (pair 1b/2) | Non-validator sender delivering to a non-primary | `not_validator`, not `not_primary` |
 | CN-TC-16.22 | UC-16-E9 (pair 2/3) | Non-primary receives a malformed record | `not_primary`, not `invalid_record` |
 | CN-TC-16.23 | UC-16-E9 (pair 3/5, before Epic 6) | Malformed record with an unknown issuer | `invalid_record` (shape check wins; resolver not consulted) |
-| CN-TC-16.24 | UC-16-E9 (pair 3/4, once Epic 6 exists) | Malformed record with an unregistered issuer | `invalid_record`, not `unregistered_issuer`; owned by Slice 31 and verified by NF-TC-4.7 |
+| CN-TC-16.24 | UC-16-E9 (pair 3/4, once Epic 6 exists) | Malformed record with an unregistered issuer | `invalid_record`, not `unregistered_issuer`; owned by Slice 31b and verified by NF-TC-4.7 |
 | CN-TC-16.25 | UC-16-E9 (pair 5/6) | Bad-signature record for a hash already pending | `invalid_record`, not `duplicate` |
 | CN-TC-16.26 | UC-16-E9 (pair 6/7) | Valid record for a duplicate hash, then a valid fresh hash | Duplicate: `duplicate` and not queued again; fresh: queued and `accepted` |
 | CN-TC-16.27 | UC-16-EC1 | After each non-`accepted` code, submit the same `document_hash` again with a valid record | Later submission succeeds; no mempool entry or duplicate-hash lock left by the rejected attempt |
@@ -305,7 +305,7 @@ Real channel between a non-primary (sender) and the primary. Check order (the co
 
 ---
 
-## 18. `ChainState` Append vs Chain-Sync Replace (UC-17; plan Slice 16; PRD FR-32)
+## 18. `ChainState` Append vs Chain-Sync Replace (UC-17; plan Slice 16a; PRD FR-32)
 
 | # | Use Case | Test Case | Expected Result |
 |---|----------|-----------|-----------------|
