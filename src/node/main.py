@@ -8,8 +8,9 @@ passed to the core, per CONSENSUS_MODE.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -18,10 +19,15 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from blockchain_core import JsonChainStore, NodeState, public_key_to_pem, restore_node_state
 from blockchain_core.keys import PublicKey
+from node.api.chain import router as chain_router
 from node.api.node_info import router as node_info_router
+from node.api.peers import PeerOut
+from node.api.peers import router as peers_router
 from node.config import NodeConfig, load_config
 from node.errors import install_error_handlers
 from node.key_resolver import CombinedKeyResolver, ResolverHolder
+from node.peers.registry import PeerRegistry
+from node.peers.seed_registration import PeerTransport, UrllibTransport, register_with_seeds
 from node.registries import (
   IssuerRegistry,
   ValidatorRegistry,
@@ -48,6 +54,7 @@ class NodeContext:
   resolvers: ResolverHolder
   validator: ChainValidator
   validity_cache: ValidityCache
+  peers: PeerRegistry
 
 
 def _same_key(a: PublicKey, b: PublicKey) -> bool:
@@ -120,21 +127,52 @@ def build_node_context(config: NodeConfig) -> NodeContext:
     resolvers=resolvers,
     validator=validator,
     validity_cache=validity_cache,
+    peers=PeerRegistry(config.node_id),
   )
 
 
-def create_app(config: NodeConfig) -> FastAPI:
+def create_app(
+  config: NodeConfig,
+  *,
+  peer_transport: PeerTransport | None = None,
+  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> FastAPI:
   context = build_node_context(config)  # fail fast at construction, not on first request
 
   @asynccontextmanager
   async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    yield
-    context.store.close()
+    task: asyncio.Task[None] | None = None
+    if config.seed_peers:
+      payload = {
+        "node_id": config.node_id,
+        "host": config.node_host,
+        "port": config.node_port,
+        "public_key": public_key_to_pem(context.state.node_key.public_key).decode("ascii"),
+      }
+      task = asyncio.create_task(
+        register_with_seeds(
+          config.seed_peers,
+          payload,
+          context.peers,
+          peer_transport or UrllibTransport(),
+          PeerOut,
+          sleep=sleep,
+        )
+      )
+    try:
+      yield
+    finally:
+      if task is not None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+      context.store.close()
 
   app = FastAPI(title="Document verification node", lifespan=lifespan)
   app.state.context = context
   install_error_handlers(app)
   app.include_router(node_info_router)
+  app.include_router(peers_router)
+  app.include_router(chain_router)
   app.add_middleware(
     CORSMiddleware,
     allow_origins=list(config.cors_origins),

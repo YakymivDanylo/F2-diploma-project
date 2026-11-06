@@ -20,6 +20,8 @@ class ConfigError(ValueError):
 class NodeConfig:
   node_id: str
   issuer_id: str
+  node_host: str  # advertised address other nodes use to reach this node
+  node_port: int
   consensus_mode: ConsensusMode
   expected_difficulty: int | None  # PoW only; None under PBFT
   issuer_key_path: Path
@@ -100,6 +102,8 @@ def load_config(env: Mapping[str, str] | None = None) -> NodeConfig:
   return NodeConfig(
     node_id=_get(source, "NODE_ID"),
     issuer_id=_get(source, "ISSUER_ID"),
+    node_host=_get(source, "NODE_HOST", "localhost"),
+    node_port=_int(source, "NODE_PORT", 8000, minimum=1, maximum=65535),
     consensus_mode=typed_mode,
     expected_difficulty=difficulty,
     issuer_key_path=Path(_get(source, "ISSUER_KEY_PATH")),
