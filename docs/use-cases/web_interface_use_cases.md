@@ -2,6 +2,10 @@
 
 > Based on [PRD](../PRD.md) — Epic 4: Web Interface (React)
 
+> Updated 2026-11-06 (review fixes): `GET /node/info` now also returns the node's own `issuer_id` and `issuer_name` (Epic 3 UC-12, decision D-B). Added UC-1-F (Issue page shows the institution label) and UC-8-A (node selector entries show the institution label). No existing IDs changed.
+
+> Updated 2026-11-06 (approved multi-institution topology): UC-4 (Verify via file upload) and, through its shared result display, UC-5 now show the institution display name `issuer_name` next to `issuer_id` (Epic 3 UC-13); new UC-4-A2 covers verification at a different institution's node than the issuing one. The Issue page submits to the user's own institution node; the resulting record carries that node's issuer (no issuer selection in the UI). No UC IDs changed.
+
 > Updated 2026-09-07 (v1.3 pass): Revised UC-1-E4, UC-2-E2 to align with PRD v1.3 (architecture-review polish, FINAL). Key change: the `409 Conflict` duplicate-hash rejection surfaced by the UI now also covers a `hash` already present in the node's current pending batch/mempool, not only a hash already in a finalized block (Epic 3 FR-22, v1.3 broadening) — the UI's duplicate-submission error handling is unaffected in shape, since it already treats any `409` response uniformly as a distinct duplicate-submission error. No use cases were removed; numbering is unchanged.
 >
 > Updated 2026-09-07 (v1.2 pass): Revised UC-1, UC-2, UC-7 to align with PRD v1.2 (second architecture-review round). Key changes: the Issue-page submission (UC-1/UC-2) explicitly confirms the node performs `IssuerKeyPair` signing server-side upon receiving the unsigned `{hash, metadata}` body — no remaining ambiguity about "who signs"; a new `409` duplicate-hash error flow is added to UC-1/UC-2, replacing the prior generic "node rejects the submission" language with the single, authoritative duplicate-document-hash policy (Epic 3 FR-22); "chain has zero blocks / no genesis yet" language is removed from UC-7-EC1 — the chain is never empty, genesis always exists; UC-7 and UC-9 clarify that `GET /node/info` is backed by an incrementally-updated cache, so polling/auto-refresh does not imply expensive per-request full revalidation. No use cases were removed; numbering is unchanged.
@@ -32,6 +36,8 @@ This document covers the React single-page application: the Issue page, the Veri
 ### Alternative Flows
 - **UC-1-A: Drag-and-drop vs. file-picker click** — both trigger the same downstream hashing/submission flow from step 2.
 - **UC-1-B: Very large file** — hashing is performed via streaming/chunked reads through the Web Crypto API so the UI thread is not blocked during hashing.
+
+- **UC-1-F (NEW 2026-11-06): Issue page shows the institution label** — on load (and whenever the configured node changes) the Issue page calls `GET /node/info` on the node it submits to and displays the node's own institution, `issuer_name` (falling back to `issuer_id` when the name equals it or is absent), together with `issuer_id`, for example "Issuing as: <issuer_name> (<issuer_id>)", before the user submits. After a successful submission and confirmation (UC-3) the same label is what the later Verify result shows for this record. The label is informational only: the user cannot choose or change the issuer. The same label is shown on the pasted-hash Issue flow (UC-2). If `GET /node/info` fails, the label shows an explicit "institution unknown" state and submission is not blocked by the label alone (the submission itself reports node errors per UC-1-E2).
 
 ### Error Flows
 - **UC-1-E1: No file selected and no hash provided** — form submitted with the required input missing. Client-side validation blocks submission and shows an inline error; no network request is made.
@@ -117,12 +123,13 @@ This document covers the React single-page application: the Issue page, the Veri
 1. User uploads a file.
 2. Browser computes SHA-256 client-side (same mechanism as UC-1).
 3. Frontend queries `GET /documents/{hash}` (relocated to Epic 3 and renamed from `GET /documents/search?hash=` in PRD v1.1).
-4. UI displays: found/not-found (an HTTP 404 response from the API is mapped directly to "not found" — the endpoint's 404 semantics are the authoritative signal, not an inferred empty-body case), issuer identity, issuance timestamp, and containing block index, plus the Merkle-proof validity result (UC-6).
+4. UI displays: found/not-found (an HTTP 404 response from the API is mapped directly to "not found" — the endpoint's 404 semantics are the authoritative signal, not an inferred empty-body case), issuer identity (`issuer_id` plus the institution display name `issuer_name` returned by the API; when no name is configured `issuer_name` equals `issuer_id`), issuance timestamp, and containing block index, plus the Merkle-proof validity result (UC-6).
 
 **Postconditions**: User sees a definitive verification result for the uploaded document.
 
 ### Alternative Flows
 - **UC-4-A**: This flow shares its downstream query/result-display logic (steps 3–4) with UC-5 (pasted-hash entry point).
+- **UC-4-A2 (NEW 2026-11-06 — cross-institution verification)**: The Verify page is connected to institution C's node (node3) and the uploaded file was issued at institution B's node (node2). The result shows B's `issuer_id` (issuer2) and B's `issuer_name` (the institution name), not C's; when B's registry entry has no `name`, `issuer_name` falls back to `issuer_id`. Holds for documents finalized in both PoW and PBFT mode (Epic 3 UC-4-A2).
 
 ### Error Flows
 - **UC-4-E1: API unreachable during search** — the node cannot be reached. UI shows a clear error/retry state, distinct from a "not found" result — the two must never be visually or semantically conflated.
@@ -235,6 +242,9 @@ Identical to UC-4 from step 3 onward, using a user-pasted hash instead of a clie
 4. UI updates the consensus-mode badge (UC-9) to reflect the newly selected node's reported mode.
 
 **Postconditions**: The visualization reflects a different node's independent chain view, without navigating away from the page.
+
+### Alternative Flows
+- **UC-8-A (NEW 2026-11-06): Selector shows the institution label** — each entry of the node selector is labeled with the institution that runs the node, taken from that node's `GET /node/info` (`issuer_name`, defaulting to `issuer_id`; for example "Institution B (issuer2) - node2"), so the presenter can tell which institution's view is displayed. On a node switch the label of the selected entry and the consensus badge (UC-9) are refreshed from the newly selected node's `GET /node/info`. An entry whose `GET /node/info` is unreachable falls back to showing its configured node URL/identifier with an "institution unknown" marker, never a stale label from another node.
 
 ### Error Flows
 - **UC-8-E1: Newly selected node is unreachable** — an explicit error is shown scoped to that selection; the UI does not silently keep showing the previously selected node's data as if the switch succeeded.
