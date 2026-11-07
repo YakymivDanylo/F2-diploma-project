@@ -20,6 +20,7 @@ This document covers the React single-page application: the Issue page, the Veri
 | TC-1.8 | UC-1-E4 (v1.3 broadened — pending duplicate) | Node rejects with `409` because `hash` is already present in the node's pending batch/mempool (not yet finalized) | UI shows the identical distinct duplicate-submission error as TC-1.7, regardless of whether the duplicate was finalized or merely pending |
 | TC-1.9 | UC-1-EC1 | Upload an empty file (0 bytes) | A hash is still computed (SHA-256 of the empty byte string) and submitted normally, not specially rejected by the client |
 | TC-1.10 | UC-1-EC2 | Upload the identical file twice in succession | Second submission is sent normally; node rejects with `409`; UI surfaces the rejection clearly (no silent retry, hiding, or false success) |
+| TC-1.11 | UC-1-F (institution label) | Open the Issue page against a node whose `GET /node/info` returns `issuer_id = "issuer2"`, `issuer_name = "Institution B"`; then against a node whose registry entry has no `name` (`issuer_name` = `issuer_id`); then make the `GET /node/info` call fail | Page shows the institution label with `issuer_name` and `issuer_id`; with no custom name it shows the `issuer_id` without duplicated or empty text; on call failure it shows "institution unknown" and the Issue form stays usable (no crash, no blocking error) |
 
 ---
 
@@ -56,6 +57,7 @@ This document covers the React single-page application: the Issue page, the Veri
 | TC-4.4 | UC-4-E2 | API returns a response that does not match the expected schema | UI shows a graceful error state without crashing |
 | TC-4.5 | UC-4-EC1 | Upload a file whose hash was never issued (API returns 404) | UI shows an explicit "not found" result, clearly distinguished from the error state (TC-4.3) and from "found but invalid" (TC-4.6) |
 | TC-4.6 | UC-4-EC2 (central end-to-end tamper test) | Verify a document whose on-chain record content/metadata was tampered with in the backing store | Merkle-proof verification fails; UI displays an explicit "invalid" result — NEVER "valid" and NEVER silently treated the same as "not found" |
+| TC-4.7 | UC-4-A2 (multi-issuer; `issuer_name`) | Verify (file upload and, as the shared result path, pasted hash) a document issued at institution B and looked up through institution C's node: (a) `GET /documents/{hash}` returns `issuer_id = "issuer2"` and `issuer_name = "Institution B"`; (b) response has `issuer_id` but no `issuer_name` (older node or absent field) | (a) Result view shows the issuer name next to the `issuer_id`; (b) UI falls back to showing `issuer_id` only, with no "undefined"/empty label and no error state; in both cases the found/valid verdict and Merkle-proof indicator are unchanged |
 
 ---
 
@@ -102,6 +104,7 @@ This document covers the React single-page application: the Issue page, the Veri
 | TC-8.1 | UC-8 primary | Select a different node from the node selector | UI re-fetches `GET /chain` from the new node's URL, re-renders without a full page reload, and updates the consensus-mode badge |
 | TC-8.2 | UC-8-E1 | Select a node that is unreachable | An explicit error is shown scoped to that selection; UI does not silently keep showing the previously selected node's data as if the switch succeeded |
 | TC-8.3 | UC-8-EC1 | Switch to a node whose chain differs from the previously viewed node's at some block index (fork demonstration) | Each node's chain is rendered independently and accurately; the UI never attempts to merge or reconcile the two views |
+| TC-8.4 | UC-8-A (institution label in selector) | Open the node selector with four nodes reachable (`GET /node/info` per node), then with one node unreachable | Each entry shows its institution label (`issuer_name` with `issuer_id`, for example node2 shows Institution B / issuer2); for the unreachable node the entry shows "institution unknown" while remaining selectable, and its selection still produces the TC-8.2 error state; labels follow each node's own response, never another node's |
 
 ---
 
@@ -114,3 +117,22 @@ This document covers the React single-page application: the Issue page, the Veri
 | TC-9.3 | UC-9-E1 | `GET /node/info` is unreachable | Badge shows an explicit "unknown" state, never a stale or guessed label |
 | TC-9.4 | UC-9-EC1 | Switch between nodes configured with different consensus modes | Badge correctly and independently reflects each node's own reported mode, never caching/reusing a previously displayed mode |
 | TC-9.5 | UC-9-EC2 | Select a freshly started node with zero blocks beyond genesis | Badge still correctly displays the node's configured algorithm immediately, rather than showing "unknown" or blank |
+
+---
+
+## 10. Coverage Matrix and Totals
+
+| Section | Use case | Test cases | Count |
+|---|---|---|---|
+| 1 | UC-1 (incl. UC-1-F, TC-1.11) | TC-1.1 to TC-1.11 | 11 |
+| 2 | UC-2 | TC-2.1 to TC-2.4 | 4 |
+| 3 | UC-3 | TC-3.1 to TC-3.5 | 5 |
+| 4 | UC-4 (incl. UC-4-A2, multi-issuer `issuer_name`, TC-4.7) | TC-4.1 to TC-4.7 | 7 |
+| 5 | UC-5 | TC-5.1 to TC-5.3 | 3 |
+| 6 | UC-6 | TC-6.1 to TC-6.5 | 5 |
+| 7 | UC-7 | TC-7.1 to TC-7.7 | 7 |
+| 8 | UC-8 (incl. UC-8-A, TC-8.4) | TC-8.1 to TC-8.4 | 4 |
+| 9 | UC-9 | TC-9.1 to TC-9.5 | 5 |
+| **Total** | | | **51** |
+
+Previously 48 cases (no totals table existed); added for the multi-issuer topology and PRD v2.1 additions (2026-11-06): TC-4.7, TC-1.11, TC-8.4.

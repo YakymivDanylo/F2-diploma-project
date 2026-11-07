@@ -2,7 +2,7 @@
 
 > Based on [PRD](../PRD.md) and [Use Cases](../use-cases/nfr_operations_use_cases.md)
 
-This document covers PRD Epic 6 (v1.9, FR-1 to FR-23): Prometheus export and the Prometheus/Grafana stack (Slice 30), API hardening (Slice 31), TLS 1.3 and the dev CA (Slice 32), container hardening, snapshots and CI gates (Slice 33), and the NFR measurement suite and reporting (Slices 34-35). Every E6-UC scenario in `nfr_operations_use_cases.md` is mapped below, one test case per scenario.
+This document covers PRD Epic 6 (v1.9, FR-1 to FR-23): Prometheus export and the Prometheus/Grafana stack (Slice 30), API hardening (Slices 31a/31b), TLS 1.3 and the dev CA (Slices 32a/32b), container hardening, snapshots and CI gates (Slices 33a/33b), and the NFR measurement suite and reporting (Slices 34-35). Every E6-UC scenario in `nfr_operations_use_cases.md` is mapped below, one test case per scenario.
 
 **ID and mapping rule.** Test case IDs are `NF-TC-<uc>.<n>`, where `<uc>` is the E6-UC number. Within a use case the numbering follows the order: primary flow (`.1`), alternative flows A1, A2, ... in numeric order, error flows E1, E2, ... in numeric order, then edge cases EC1, EC2, ... For example E6-UC-1 -> NF-TC-1.1, E6-UC-1-A1 -> NF-TC-1.2. The "Use Case" column names the exact scenario. Where a use case contains flows marked MOVED to Epic 3, the numbering skips them (they get no NF-TC); see the pointer table below.
 
@@ -102,6 +102,7 @@ This document covers PRD Epic 6 (v1.9, FR-1 to FR-23): Prometheus export and the
 | NF-TC-3.25 | E6-UC-3-EC10 | Send `http`, `websocket` and `lifespan` scopes through the middleware | `http` and `websocket` keyed identically; `lifespan` passed through untouched |
 | NF-TC-3.26 | E6-UC-3-EC11 | Exemption on; validator connects over its IPv4-mapped IPv6 form | Still recognized as exempt (same normalization as EC5) |
 | NF-TC-3.27 | E6-UC-3-EC12 | Prometheus scrapes `GET /metrics` at the default interval | Counted like any client and stays well under the limit |
+| NF-TC-3.28 | E6-UC-3-EC13 | Send a 100-peer `POST /peers/register` flood (a) from the Docker host and (b) from a container on the Docker network, with a second client on a different source address reading the same node | (a) All host requests share one source IP, exhaust 100 per 60 s and the excess gets 429 in the standard envelope with `Retry-After` (expected, documented as intentional when demonstrating the limit); (b) a container flood has its own source IP and is not attributed to the host/verifier, whose requests are not limited; a test that needs the full 100 registrations to succeed uses a container source |
 
 ---
 
@@ -117,7 +118,7 @@ Only Epic 6 additions are tested here (check 4 of the handler order and PoW bloc
 | NF-TC-4.4 | E6-UC-4-A3 | Run the unregistered-issuer scenario with `RATE_LIMIT_EXEMPT_VALIDATORS` both `true` and `false` | `forward_record` messages are not rate limited per message; the issuer check runs and yields the same result in both settings |
 | NF-TC-4.5 | E6-UC-4-A7 | PoW mode: build a block whose record has an `issuer_id` absent from the receiving node's `IssuerRegistry` (hash, link, Merkle root, difficulty valid); deliver via PoW broadcast and via chain sync | Both paths reject with `failure_type = "signature"`; block not appended; tip unchanged; `blocks_rejected_total{failure_type="signature"}` +1 per path; no `unregistered_issuer` reply possible in PoW; test depends on Slice 30 |
 | NF-TC-4.6 | E6-UC-4-E1 | Valid validator forwards a signed record with an unregistered `issuer_id` | Reply `unregistered_issuer` (WS reply code, not an HTTP status); `mempool_size` unchanged; no block can include it; the forwarding node returns 403 in the envelope on the original `POST /documents` |
-| NF-TC-4.7 | E6-UC-4-E4 | Forward a malformed record (missing `issuer_id`, bad hash, oversized metadata) | Reply `invalid_record` (check 3) before the registry lookup; a spy on the registry confirms it is not consulted; ordering 3-before-4 holds after Slice 31; the Slice 17b test for resolver-miss `invalid_record` is updated to `unregistered_issuer` |
+| NF-TC-4.7 | E6-UC-4-E4 | Forward a malformed record (missing `issuer_id`, bad hash, oversized metadata) | Reply `invalid_record` (check 3) before the registry lookup; a spy on the registry confirms it is not consulted; ordering 3-before-4 holds after Slice 31b; the Slice 17b test for resolver-miss `invalid_record` is updated to `unregistered_issuer` |
 | NF-TC-4.8 | E6-UC-4-E5 | Forward a record with a registered `issuer_id` and an invalid signature | Reply `invalid_record`, never `unregistered_issuer`; not queued; 422 on the original request |
 | NF-TC-4.9 | E6-UC-4-E6 | Enumerate public routes; submit a pre-signed record body to `POST /documents` | No public route accepts a pre-signed record; response is 400 via envelope, not 403 |
 | NF-TC-4.10 | E6-UC-4-EC1 | Forward a record whose `issuer_id` differs from a registered one by case, then by trailing whitespace | Exact match only: both yield `unregistered_issuer` |
@@ -631,7 +632,7 @@ Only Epic 6 additions are tested here (check 4 of the handler order and PoW bloc
 |---|---|---|---|
 | E6-UC-1 | primary, A1-A3, E1-E5, EC1-EC5 | NF-TC-1.1 to 1.14 | 14 |
 | E6-UC-2 | primary, A1-A3, E1-E5, EC1-EC3 | NF-TC-2.1a, 2.1b, 2.2 to 2.12 | 13 |
-| E6-UC-3 | primary, A1-A6, E1-E8, EC1-EC12 | NF-TC-3.1 to 3.27 | 27 |
+| E6-UC-3 | primary, A1-A6, E1-E8, EC1-EC13 | NF-TC-3.1 to 3.28 | 28 |
 | E6-UC-4 | primary, A1-A3, A7, E1, E4-E6, EC1-EC4, EC6 (A4-A6, A8-A10, E2, E3, E7, E8, EC5, EC7, EC8 MOVED) | NF-TC-4.1 to 4.14; moved flows -> CN-TC-15.x / 16.x (pointer table) | 14 |
 | E6-UC-5 | primary, A1-A2, E1-E4, EC1-EC5 | NF-TC-5.1 to 5.12 | 12 |
 | E6-UC-6 | primary, A1-A2, E1-E2, EC1-EC2 | NF-TC-6.1 to 6.7 | 7 |
@@ -659,7 +660,7 @@ Only Epic 6 additions are tested here (check 4 of the handler order and PoW bloc
 | E6-UC-28 | primary, A1-A3, E1-E6, EC1-EC3 | NF-TC-28.1 to 28.13 | 13 |
 | E6-UC-29 | primary, A1-A7, E1-E6, EC1-EC5 | NF-TC-29.1a, 29.1b, 29.2 to 29.19 | 20 |
 | E6-UC-30 | primary, A1-A3, E1-E8, EC1-EC5 | NF-TC-30.1 to 30.17 | 17 |
-| **Total** | | | **387** |
+| **Total** | | | **388** |
 
 ### Coverage by test category
 
@@ -676,7 +677,7 @@ Only Epic 6 additions are tested here (check 4 of the handler order and PoW bloc
 
 ### Totals
 
-- NF-TC cases: **387** across 30 use cases.
+- NF-TC cases: **388** across 30 use cases.
 - E6-UC scenarios with no NF-TC because they are MOVED to Epic 3: 13 rows of the pointer table (covered by CN-TC-15.x, CN-TC-16.x, CN-TC-17.10).
 - Unmapped E6-UC scenarios: none.
 

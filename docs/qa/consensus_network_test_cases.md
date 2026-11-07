@@ -2,7 +2,7 @@
 
 > Based on [PRD](../PRD.md) and [Use Cases](../use-cases/consensus_network_use_cases.md)
 
-This document covers the multi-node network layer: peer registration/discovery, REST chain synchronization, WebSocket block/PBFT-message broadcast, PoW and PBFT consensus, and docker-compose deployment (PRD Epic 3). Every UC scenario in `consensus_network_use_cases.md` is mapped below: UC-1 to UC-14 and the cross-cutting section (v1.3) as `TC-<uc>.<n>` / `TC-EV.<n>`, and, added for v1.8 / PRD v1.9, UC-15 (`RecordForwarder` and HTTP mapping), UC-16 (`forward_record` channel on `WS /ws/pbft`) and UC-17 (`ChainState` append vs replace) as `CN-TC-15.<n>`, `CN-TC-16.<n>`, `CN-TC-17.<n>` in sections 16 to 18. The `CN-` prefix is used for the v1.8 additions so that cross-document references from `nfr_operations_test_cases.md` (which uses `NF-TC-`) are unambiguous; existing `TC-` IDs are unchanged. A coverage matrix and totals are in section 19. Given this thesis's central contribution, extra weight is given to: the `ValidatorSet` vs. `PeerInfo` separation (Sybil-registering extra peers must NOT inflate quorum), the PBFT quorum-counting rule (primary's own pre-prepare counts toward its own prepare), the simplified round-robin view-change, the PoW-only fork tie-break (a same-height PBFT fork is a Byzantine event, never silently resolved), full chain revalidation on divergent-fork sync vs. incremental on strict extension, `GET /node/info`'s incrementally-updated validity cache, and the error envelope / input validation / CORS / pagination cross-cutting requirements.
+This document covers the multi-node network layer: peer registration/discovery, REST chain synchronization, WebSocket block/PBFT-message broadcast, PoW and PBFT consensus, and docker-compose deployment (PRD Epic 3). Every UC scenario in `consensus_network_use_cases.md` is mapped below: UC-1 to UC-14 and the cross-cutting section (v1.3) as `TC-<uc>.<n>` / `TC-EV.<n>`, and, added for v1.8 / PRD v1.9, UC-15 (`RecordForwarder` and HTTP mapping), UC-16 (`forward_record` channel on `WS /ws/pbft`) and UC-17 (`ChainState` append vs replace) as `CN-TC-15.<n>`, `CN-TC-16.<n>`, `CN-TC-17.<n>` in sections 16 to 18. The `CN-` prefix is used for the v1.8 additions so that cross-document references from `nfr_operations_test_cases.md` (which uses `NF-TC-`) are unambiguous; existing `TC-` IDs are unchanged. Added for the approved multi-issuer topology (2026-11-06; one validator node per institution, n = 4, f = 1, each institution with its own issuer identity issuer1..issuer4 paired with node1..node4, static identical `ValidatorSet` and `IssuerRegistry`), TC-1.6 and TC-14.8 are reworded in place and eighteen `CN-TC-MI` cases (PRD v2.1 additions) are appended at the end of sections 1, 3, 4, 11, 12, 13 and 14 (CN-TC-MI.1 to MI.18; the `MI` series is used so that no new ID collides with the existing `TC-<uc>.<n>` cases cited elsewhere as `CN-TC-<uc>.<n>`); the earlier "single shared issuer identity" simplification no longer applies. A coverage matrix and totals are in section 19. Given this thesis's central contribution, extra weight is given to: the `ValidatorSet` vs. `PeerInfo` separation (Sybil-registering extra peers must NOT inflate quorum), the PBFT quorum-counting rule (primary's own pre-prepare counts toward its own prepare), the simplified round-robin view-change, the PoW-only fork tie-break (a same-height PBFT fork is a Byzantine event, never silently resolved), full chain revalidation on divergent-fork sync vs. incremental on strict extension, `GET /node/info`'s incrementally-updated validity cache, and the error envelope / input validation / CORS / pagination cross-cutting requirements.
 
 ---
 
@@ -15,12 +15,15 @@ This document covers the multi-node network layer: peer registration/discovery, 
 | TC-1.3 | UC-1-C (core C-4 test) | Node boots with a fixed `ValidatorSet` config (`n`, derived `f`) | `ValidatorSet` is logged at boot; is never mutated at runtime; is never derived from or updated by `PeerInfo` registrations |
 | TC-1.4 | UC-1-C | A `ValidatorSet` entry is rotated (old key marked `retired_at`, new key added) | Old entry is retained (not deleted) with `retired_at` set; remains resolvable for historical signature verification |
 | TC-1.5 | UC-1-D | Node boots with a configured `IssuerRegistry` (`issuer_id → public_key`) | Registry is loaded and logged at boot alongside `ValidatorSet` |
-| TC-1.6 | UC-1-D | Inspect `IssuerRegistry` configuration across all nodes in the demo network | Every node is configured with the identical single shared `issuer_id`/public key (thesis-scope decision) |
+| TC-1.6 | UC-1-D | Inspect `IssuerRegistry` and `ValidatorSet` configuration across all four nodes of the demo network (one validator node per institution) | Every node loads the identical static `IssuerRegistry` holding all four issuers (issuer1..issuer4, one per institution, each with its own public key) and the identical `ValidatorSet` (node1..node4, n = 4, f = 1); each node additionally holds the private key of only its own institution's issuer (issuerN paired with nodeN) |
 | TC-1.7 | UC-1-E1 | Configured seed peer's container is not yet reachable at startup (cold-start race) | Node retries with backoff; does not crash or give up permanently |
 | TC-1.8 | UC-1-E2 | The same `node_id` registers again (e.g., after restart) | Existing `PeerInfo` entry's `last_seen`/`host`/`port` is updated; no duplicate entry created |
 | TC-1.9 | UC-1-E3 | Registration payload is missing `public_key` or `host`, or `public_key` fails Pydantic validation | Rejected with a 400-level validation error in the standard error envelope |
 | TC-1.10 | UC-1-EC1 | A node attempts to register itself (`node_id` equals the receiving node's own id) | Self-registration is rejected/ignored |
 | TC-1.11 | UC-1-EC2 (core C-4 test) | Flood a node with a very large number of `POST /peers/register` calls (Sybil-style `PeerInfo` growth) | Node does not crash or exhaust memory; critically, the PBFT quorum threshold (verified via UC-6) remains completely unaffected by this growth |
+| CN-TC-MI.1 | UC-1-E4 (issuer key mismatch at boot; with UC-1-D) | Boot a node whose `ISSUER_ID` (for example `issuer2`) has a key store whose private key does not derive the public key registered for that `issuer_id` in `IssuerRegistry` | Node refuses to boot (fail-fast) with a clear error naming the `issuer_id`; no port opened, no peer registration, no record ever signed. Complements TC-14.6 (missing/malformed config), which does not cover this mismatch |
+| CN-TC-MI.2 | UC-1-E4 (absent `ISSUER_ID` / missing key; with UC-1-D) | Boot a node whose `ISSUER_ID` is absent from `IssuerRegistry`, and separately one whose key store holds no issuer private key | Both cases refuse to boot with an explicit error; error output contains no key material |
+| CN-TC-MI.3 | UC-1-D (`name` default and validation rules) | (a) Load an `IssuerRegistry` in which one entry has `name` and another omits it; (b) load a registry file with no `name` fields at all; (c) negative registries, each separately: empty or whitespace-only `name`, non-string `name` (number, list, null), the same `name` on two different `issuer_id`s, `name` of 101 characters (100 accepted), conflicting `name`s across rotated entries of one `issuer_id` | (a) Entry with `name` exposes it; entry without `name` exposes `name = issuer_id`; (b) still boots (field optional, additive); (c) every negative registry makes boot fail fast with an explicit error naming the offending `issuer_id`/field; `name` is never used in key resolution |
 
 ---
 
@@ -51,6 +54,11 @@ This document covers the multi-node network layer: peer registration/discovery, 
 | TC-3.12 | UC-3-EC1 (PBFT — MUST NOT tie-break) | Two differently-finalized blocks are observed at the same height on a PBFT chain | The node MUST NOT silently pick one via lowest-hash or any tie-break; it reports/logs the condition as a Byzantine-fault/safety-violation event and surfaces it via `quorum_status` |
 | TC-3.13 | UC-3-EC2 | A sync request arrives while the node is mid-mining or mid-PBFT-round | The in-progress consensus round is abandoned/restarted cleanly against the newly adopted chain; no corrupted state results |
 | TC-3.14 | UC-3-EC3 | A node far behind performs a full historical sync via repeated paginated `GET /chain?from=&to=` requests | Large-transfer/timeout handling completes without hanging indefinitely |
+| CN-TC-MI.13 | UC-3-F, UC-3-EC4 | Restart a node with a persisted chain while all peers are unreachable; `STARTUP_SYNC_TIMEOUT_S` set to a small value (for example 5); then bring a peer with a longer valid chain up | Node does not serve (and `POST /documents` gets the retry-later status) until sync finishes or the timeout elapses; at timeout it serves its LOCAL chain and logs a warning naming the timeout and that no peer chain was confirmed; it neither aborts nor waits past the timeout; after serving begins, normal periodic/broadcast sync adopts the peer's longer valid chain |
+| CN-TC-MI.14 | UC-1-EC4, UC-3-EC4 | Start all 4 nodes simultaneously (docker-compose up) with seed peers not yet reachable, in both modes | Registration retries with backoff (TC-1.7); every node's startup sync is bounded by `STARTUP_SYNC_TIMEOUT_S`; no node waits indefinitely for another; all 4 nodes are serving within the timeout plus a margin, and peers/chains converge afterwards |
+| CN-TC-MI.15 | UC-3-G (tamper self-heal) | Stop node X, corrupt one block in its persisted chain store, restart X with peers reachable | Log contains the invalid persisted chain with the correct `first_invalid_index`; X does not serve from the invalid chain; it validates and adopts the peers' valid chain, replaces and persists it; only then serves; `GET /node/info` shows `chain_valid = true`, `first_invalid_index = null`; the tampered document resolves with original data and a verifying Merkle proof; reloading the store after another restart is valid |
+| CN-TC-MI.16 | UC-3-G, UC-3-EC4 (no-peer variant) | Same corruption as MI.15 but no peer reachable within `STARTUP_SYNC_TIMEOUT_S` | X serves its local invalid chain after the timeout with a logged warning; `GET /node/info` reports `chain_valid = false` with `first_invalid_index` populated (HTTP 200, TC-12.4); store is not silently overwritten; when a peer later becomes reachable, sync adopts its valid chain and `chain_valid` returns to true |
+| CN-TC-MI.17 | UC-3-EC5 | Start with `INIT_CHAIN` set on an empty store; stop; restart with `INIT_CHAIN` still set and a persisted chain holding added blocks; separately start without `INIT_CHAIN` on an empty store | First start creates genesis; the second start ignores `INIT_CHAIN`, keeps the existing chain unchanged and goes through load-then-sync (MI.18); empty store without the flag aborts with `ChainStoreMissingError` |
 
 ---
 
@@ -71,6 +79,10 @@ This document covers the multi-node network layer: peer registration/discovery, 
 | TC-4.11 | UC-4-E6 (v1.3 broadened — pending/mempool) | Submit a `hash` that is already present in the node's current pending batch/mempool but NOT yet finalized | Also rejected with `409 Conflict` — verifies the v1.3-broadened duplicate-check scope |
 | TC-4.12 | UC-4-EC1 | Submit a hash matching a finalized or pending duplicate | Always and only handled via the `409` rejection path (TC-4.10/TC-4.11) — there is no alternate no-op/silent-success behavior |
 | TC-4.13 | UC-4-EC2 (concurrency) | Fire two concurrent submissions for the SAME hash at the same node simultaneously | The per-hash/global submission lock ensures only one wins the check-then-sign-then-queue sequence; the loser receives `409` |
+| CN-TC-MI.4 | UC-4-A2 (cross-institution flow, PoW) | PoW mode, 4 nodes (node1..node4, issuer1..issuer4): submit `{hash, metadata}` to node2 (institution B); mine and broadcast; then `GET /documents/{hash}` on node3 (institution C) | Record is signed with issuer2; block finalized on all 4 nodes (same index and hash); node3 returns 200 with `issuer_id = "issuer2"` and `issuer_name` of institution B, plus a Merkle proof that verifies; no node re-signed or reassigned the issuer |
+| CN-TC-MI.5 | UC-4-A2 (cross-institution flow, PBFT; UC-15/UC-16 path) | PBFT mode, n = 4, f = 1, node2 is NOT the primary: submit `{hash, metadata}` to node2; then `GET /documents/{hash}` on node3 | node2 signs with issuer2 and forwards the signed record to the primary; the block is finalized on all 4 nodes; the primary/proposer leaves `issuer_id = "issuer2"` and `signature` untouched; node3 returns 200 with issuer2's `issuer_id` and `issuer_name`; the block header's proposer is the primary's `node_id`, distinct from the record's issuer |
+| CN-TC-MI.6 | UC-4 primary; UC-4-E7 (own-issuer-only signing) | Submit one document to each of node1..node4 in turn (both modes) and inspect the resulting records; inspect each node's key store | Record from nodeN carries `issuer_id = issuerN` and verifies against issuerN's public key only; each node holds only its own institution's issuer private key; a record submitted to nodeN is never signed as another issuer |
+| CN-TC-MI.11 | UC-4-E7 | `POST /documents` with a body `{hash, metadata, issuer_id: "issuer3"}` sent to node1 (both modes; also with `issuer_id` equal to the node's own) | Rejected with a 400-level Pydantic validation error in the standard error envelope, before any duplicate check; nothing signed, nothing queued, `mempool_size` unchanged; the same hash can still be submitted afterwards without `issuer_id` |
 
 ---
 
@@ -168,6 +180,7 @@ This document covers the multi-node network layer: peer registration/discovery, 
 | TC-11.2 | UC-11-E1 | Configure an invalid/unrecognized mode value (typo) | Node fails to start with a clear, explicit error; never silently defaults to an unintended mode |
 | TC-11.3 | UC-11-E2 | Start a node with no consensus mode specified | Node applies its documented explicit default, or fails fast with a clear message if no safe default is defined |
 | TC-11.4 | UC-11-EC1 | Mix `pow`-configured and `pbft`-configured nodes in what was intended to be one homogeneous cluster | Nodes detect and reject incompatible blocks/messages from mismatched-mode peers; no silent state corruption or unhandled crash |
+| CN-TC-MI.18 | UC-11-EC2, UC-3-F | Start a node in `pow` mode and, separately, in `pbft` mode with a persisted chain and reachable peers; record the order of boot log events and the time at which the API first accepts requests | In both modes the order is: load persisted chain, bounded startup sync, then serve (API, and mining / PBFT participation, begin only after sync completes or times out); before that point `POST /documents` is rejected with the retry-later status (TC-4.7) |
 
 ---
 
@@ -175,7 +188,7 @@ This document covers the multi-node network layer: peer registration/discovery, 
 
 | # | Use Case | Test Case | Expected Result |
 |---|----------|-----------|-----------------|
-| TC-12.1 | UC-12 primary | Call `GET /node/info` on a running node | Returns all of `{node_id, algorithm, n, f, node_public_key, tip_index, chain_valid, first_invalid_index, quorum_status}` with correct values |
+| TC-12.1 | UC-12 primary | Call `GET /node/info` on a running node | Returns all 11 fields `{node_id, algorithm, n, f, node_public_key, tip_index, chain_valid, first_invalid_index, quorum_status, issuer_id, issuer_name}` with correct values (the last two are the node's own institution; see CN-TC-MI.12) |
 | TC-12.2 | UC-12 primary (validity cache) | Append/sync a new block, then immediately call `GET /node/info` | `chain_valid`/`first_invalid_index` reflect the cached state updated by the append/sync event, not a freshly recomputed full revalidation |
 | TC-12.3 | UC-12-A | Call `GET /node/info` on a freshly started node with zero blocks beyond genesis | `tip_index` reflects the genesis block; `chain_valid = true`; `quorum_status` reflects normal/idle state |
 | TC-12.4 | UC-12-E1 | Call `GET /node/info` while the validity cache reports the chain invalid | Returns HTTP 200 (not an endpoint failure) with `chain_valid = false` and `first_invalid_index` populated |
@@ -183,6 +196,7 @@ This document covers the multi-node network layer: peer registration/discovery, 
 | TC-12.6 | UC-12-EC2 | Call `GET /node/info` on a PoW node | Reports `n`/`f` from its configured `ValidatorSet` even though unused for PoW quorum — must not be misread as PBFT-style quorum semantics |
 | TC-12.7 | UC-12-EC3 (central cache-cost test) | Measure `GET /node/info` latency on a short chain vs. a chain of several hundred blocks | Latency does not measurably scale with chain length |
 | TC-12.8 | Cross-check (FR-25/FR-26) | Present a PBFT block with insufficient `commit_signatures[]` via both a chain-sync request AND a `GET /node/info` cache read | Both paths report `failure_type = "quorum"` / `chain_valid = false` consistently |
+| CN-TC-MI.12 | UC-12 primary (11 fields), UC-1-D | Call `GET /node/info` on node2 (registry entry `issuer2` with `name = "Institution B"`) and on a node whose own registry entry has no `name` | Response has exactly the 11 fields of TC-12.1; node2 returns `issuer_id = "issuer2"` and `issuer_name = "Institution B"`; the node without a `name` returns `issuer_name` equal to its `issuer_id`; values equal those later returned for that node's records by `GET /documents/{hash}`; call remains cheap (no per-call revalidation) |
 
 ---
 
@@ -196,6 +210,9 @@ This document covers the multi-node network layer: peer registration/discovery, 
 | TC-13.4 | UC-13-E2 | Request a lookup on a node whose chain is itself invalid at query time | The lookup is still attempted and returns raw stored data; caller is expected to cross-check `GET /node/info`'s `chain_valid`/`first_invalid_index` before trusting the "found" result |
 | TC-13.5 | UC-13-EC1 | (Structural-integrity check) Force (via direct chain-store mutation) a `document_hash` to appear in two different finalized blocks and look it up | Surfaced as a data-integrity inconsistency, never silently resolved via "return the earliest match" |
 | TC-13.6 | UC-13-EC2 | Look up a hash whose containing block's document-record content was tampered with in storage | Endpoint still returns "found" with the (inconsistent) stored data, but the returned Merkle-proof data fails independent verification against the block's stored `merkle_root` |
+| CN-TC-MI.7 | UC-13 primary (response includes `issuer_name`) | Registry entry for `issuer2` has `name = "Institution B"`; request `GET /documents/{hash}` for a record signed by issuer2 | HTTP 200 body contains `issuer_id = "issuer2"` AND `issuer_name = "Institution B"` next to it, in addition to all fields of TC-13.1 |
+| CN-TC-MI.8 | UC-13 primary (multi-issuer; `name` fallback) | (a) Registry entry for `issuer3` has no `name`; look up a record signed by issuer3. (b) Look up a record whose `issuer_id` is not in the serving node's registry at all (for example a block accepted earlier, or a rotated-out issuer) | (a) `issuer_name` equals `issuer_id` (`"issuer3"`); field is present, never null or absent. (b) `issuer_name` equals the unknown `issuer_id`; the lookup still returns 200 and does not fail |
+| CN-TC-MI.9 | UC-13 primary (multi-issuer; additive-only) | Change a registry entry's `name` and restart; look up a previously issued record and re-validate the chain | Returned `issuer_name` follows the new config; record signature, block hash and Merkle proof are unaffected (`name` is not part of any signed or hashed data); existing clients ignoring `issuer_name` still work |
 
 ---
 
@@ -210,7 +227,8 @@ This document covers the multi-node network layer: peer registration/discovery, 
 | TC-14.5 | UC-14-E1 | `resolve_node_key`/`resolve_issuer_key` is asked to resolve an identity present in neither registry | Returns "not found" rather than throwing or defaulting to `None`-as-valid; calling validation treats this as `failure_type = "signature"` |
 | TC-14.6 | UC-14-E2 | Start a node with a missing or malformed `IssuerRegistry`/`ValidatorSet` config file | Node fails to start with a clear, explicit error (fail-fast) |
 | TC-14.7 | UC-14-EC1 (central time-aware resolver test) | Call `resolve_node_key(node_id, at_timestamp)` with a timestamp at/before a validator's `retired_at`, and again with a timestamp after the rotation | Returns the OLD key for the pre-rotation timestamp and the NEW key for the post-rotation timestamp for the same `node_id`; the retired entry is excluded from active `n`/`f` quorum-member counting but remains resolvable for signature checks |
-| TC-14.8 | UC-14-EC2 | Configure a node with more than one `IssuerRegistry` entry (multi-issuer, general case) | `resolve_issuer_key` correctly disambiguates by `issuer_id`, not by node identity |
+| TC-14.8 | UC-14-EC2 | Configure a node with the full multi-issuer `IssuerRegistry` of the demo network (issuer1..issuer4, one per institution; the primary model) | `resolve_issuer_key` correctly disambiguates by `issuer_id`, not by node identity; every node resolves all four issuers, including issuers other than its own |
+| CN-TC-MI.10 | UC-4-A3 (mixed-issuer block from concurrent submissions at node1 and node2); UC-14-EC2 | Build a block whose records were issued at different institutions (for example one record signed by issuer2 and one by issuer3), all signatures valid, hash/link/Merkle root valid; validate on a node of a third institution via chain sync, broadcast and the validity-cache refresh | Block passes full validation on every path; each record signature is verified against its own `issuer_id` key; blocks may legitimately contain records of different issuers; `blocks_rejected_total` unchanged |
 
 ---
 
@@ -264,7 +282,7 @@ Mapping tests run against a stub `RecordForwarder`; the real channel is exercise
 
 ## 17. `forward_record` Channel on `WS /ws/pbft` (UC-16; plan Slice 17b; PRD FR-22 (i)-(x))
 
-Real channel between a non-primary (sender) and the primary. Check order (the code returned is that of the first failing check): 1a `auth_failed`, 1b `not_validator`, 2 `not_primary`, 3 `invalid_record` (shape), 4 `unregistered_issuer` (added by Epic 6, Slice 31), 5 `invalid_record` (record signature), 6 `duplicate`, 7 queue and `accepted`. The check-4 cases are verified by `nfr_operations_test_cases.md` (NF-TC-4.x) once Slice 31 lands.
+Real channel between a non-primary (sender) and the primary. Check order (the code returned is that of the first failing check): 1a `auth_failed`, 1b `not_validator`, 2 `not_primary`, 3 `invalid_record` (shape), 4 `unregistered_issuer` (added by Epic 6, Slice 31b), 5 `invalid_record` (record signature), 6 `duplicate`, 7 queue and `accepted`. The check-4 cases are verified by `nfr_operations_test_cases.md` (NF-TC-4.x) once Slice 31b lands.
 
 | # | Use Case | Test Case | Expected Result |
 |---|----------|-----------|-----------------|
@@ -282,7 +300,7 @@ Real channel between a non-primary (sender) and the primary. Check order (the co
 | CN-TC-16.12 | UC-16-E3 | Observe the full HTTP path of a `not_primary` reply (stale view and view change) | 503 with `Retry-After` on the original `POST /documents` in the envelope |
 | CN-TC-16.13 | UC-16-E4 | Forward records with missing `issuer_id`, malformed hash, oversized metadata (three cases) | Reply `invalid_record` before any later check; original request gets 422; nothing queued |
 | CN-TC-16.14 | UC-16-E5 | Well-formed record whose signature does not verify against the issuer key | `invalid_record`; nothing queued; 422 |
-| CN-TC-16.15 | UC-16-E5 (pre/post Epic 6) | Forward a record whose `issuer_id` is unknown to the resolver | Before Slice 31: `invalid_record` (resolver miss); after Slice 31: `unregistered_issuer` (this test is updated by Slice 31; see NF-TC-4.6) |
+| CN-TC-16.15 | UC-16-E5 (pre/post Epic 6) | Forward a record whose `issuer_id` is unknown to the resolver | Before Slice 31b: `invalid_record` (resolver miss); after Slice 31b: `unregistered_issuer` (this test is updated by Slice 31b; see NF-TC-4.6) |
 | CN-TC-16.16 | UC-16-E6 | Forward a hash already in a finalized block (replay by a slow forwarder) | `duplicate` (-> 409); not included in a second block |
 | CN-TC-16.17 | UC-16-E6 | Forward a hash already in the primary's mempool | `duplicate` (-> 409); mempool unchanged |
 | CN-TC-16.18 | UC-16-E7 | Reply arrives after the sender's `FORWARD_ACK_TIMEOUT_MS`; also a reply with a never-issued `request_id` | Sender discards both (no pending `request_id`); the already-sent 503 is unchanged |
@@ -291,7 +309,7 @@ Real channel between a non-primary (sender) and the primary. Check order (the co
 | CN-TC-16.21 | UC-16-E9 (pair 1b/2) | Non-validator sender delivering to a non-primary | `not_validator`, not `not_primary` |
 | CN-TC-16.22 | UC-16-E9 (pair 2/3) | Non-primary receives a malformed record | `not_primary`, not `invalid_record` |
 | CN-TC-16.23 | UC-16-E9 (pair 3/5, before Epic 6) | Malformed record with an unknown issuer | `invalid_record` (shape check wins; resolver not consulted) |
-| CN-TC-16.24 | UC-16-E9 (pair 3/4, once Epic 6 exists) | Malformed record with an unregistered issuer | `invalid_record`, not `unregistered_issuer`; owned by Slice 31 and verified by NF-TC-4.7 |
+| CN-TC-16.24 | UC-16-E9 (pair 3/4, once Epic 6 exists) | Malformed record with an unregistered issuer | `invalid_record`, not `unregistered_issuer`; owned by Slice 31b and verified by NF-TC-4.7 |
 | CN-TC-16.25 | UC-16-E9 (pair 5/6) | Bad-signature record for a hash already pending | `invalid_record`, not `duplicate` |
 | CN-TC-16.26 | UC-16-E9 (pair 6/7) | Valid record for a duplicate hash, then a valid fresh hash | Duplicate: `duplicate` and not queued again; fresh: queued and `accepted` |
 | CN-TC-16.27 | UC-16-EC1 | After each non-`accepted` code, submit the same `document_hash` again with a valid record | Later submission succeeds; no mempool entry or duplicate-hash lock left by the rejected attempt |
@@ -305,7 +323,7 @@ Real channel between a non-primary (sender) and the primary. Check order (the co
 
 ---
 
-## 18. `ChainState` Append vs Chain-Sync Replace (UC-17; plan Slice 16; PRD FR-27)
+## 18. `ChainState` Append vs Chain-Sync Replace (UC-17; plan Slice 16a; PRD FR-32)
 
 | # | Use Case | Test Case | Expected Result |
 |---|----------|-----------|-----------------|
@@ -333,8 +351,18 @@ Real channel between a non-primary (sender) and the primary. Check order (the co
 | UC-15 | primary, A1-A4, E1-E6, EC1-EC4, plus FR-22 (x) side-effect | CN-TC-15.1 to 15.27 | 27 |
 | UC-16 | primary, A1-A5, E1-E9 (E9 as 8 pair tests), EC1-EC5, plus FR-22 (x) and PoW mode scope | CN-TC-16.1 to 16.34 | 34 |
 | UC-17 | primary, A1-A3, E1-E2, EC1-EC4, plus postconditions and side effects | CN-TC-17.1 to 17.14 | 14 |
-| **New total** | | | **75** |
+| UC-1-D / UC-1-E4 (multi-issuer topology, PRD v2.1 additions) | boot validation of own issuer key, `name` default and validation rules | CN-TC-MI.1 to MI.3 | 3 |
+| UC-4-A2 / UC-4-A3 / UC-4-E7 (multi-issuer topology, PRD v2.1 additions) | cross-institution flow PoW and PBFT, own-issuer-only signing, body `issuer_id` rejected | CN-TC-MI.4 to MI.6, MI.11 | 4 |
+| UC-13 (multi-issuer topology, PRD v2.1 additions) | `issuer_name` in `GET /documents/{hash}`, fallback to `issuer_id` (also for unknown issuer) | CN-TC-MI.7 to MI.9 | 3 |
+| UC-14 (multi-issuer topology, PRD v2.1 additions) | block with records of two issuers validates | CN-TC-MI.10 | 1 |
+| UC-12 (PRD v2.1 additions) | `GET /node/info` 11 fields incl. `issuer_id`/`issuer_name` | CN-TC-MI.12 | 1 |
+| UC-3-F, UC-3-G, UC-3-EC4, UC-3-EC5, UC-1-EC4, UC-11-EC2 (PRD v2.1 additions) | bounded startup sync, no startup deadlock, tamper self-heal (with and without peer), `INIT_CHAIN` first start only, startup order in both modes | CN-TC-MI.13 to MI.18 | 6 |
+| **New total** | | | **93** |
 
-Totals for the whole file: 115 existing cases (`TC-1.1` to `TC-14.8` plus `TC-EV.1` to `TC-EV.5`, unchanged and not renumbered) + 75 new = **190** test cases.
+UC-16-EC6 and UC-1-EC3 are documented known limitations and intentionally have no test cases.
+
+Totals for the whole file: 115 existing cases (`TC-1.1` to `TC-14.8` plus `TC-EV.1` to `TC-EV.5`, unchanged and not renumbered; TC-1.6 and TC-14.8 reworded in place for the multi-issuer topology) + 75 v1.8 cases + 18 PRD v2.1 addition cases (CN-TC-MI.1 to MI.18; the `MI` series is used so that no new ID collides with the existing `TC-<uc>.<n>` cases cited elsewhere as `CN-TC-<uc>.<n>`) = **208** test cases.
+
+Topology note (approved 2026-11-06): exactly one validator node per institution (n = 4, f = 1, node1..node4); each institution has its own issuer identity (issuer1..issuer4 paired with node1..node4); `ValidatorSet` and `IssuerRegistry` are static boot config, identical on all nodes. Divergent registries across nodes are a known risk / future work and have no test cases here.
 
 Cross-references: E6-UC-4 flows moved to Epic 3 map to CN-TC-15.x / 16.x (see the pointer table in `nfr_operations_test_cases.md`); the snapshot-copy extension of CN-TC-17.10 is NF-TC-11.11; check 4 (`unregistered_issuer`) of the handler order is verified by NF-TC-4.6 to NF-TC-4.8.

@@ -18,6 +18,7 @@ This document covers the attack scenario scripts and reporting pipeline run agai
 | TC-1.6 | UC-1-E2 | Honest network crashes entirely during the attack (unintended side effect, e.g. resource exhaustion) | Run is flagged inconclusive, not counted as attacker success |
 | TC-1.7 | UC-1-EC1 | Run with attacker hash-power share = 0 (baseline/control, no attackers or zero mining effort) | Confirms normal operation as a comparison baseline; expected outcome is "no disruption" |
 | TC-1.8 | UC-1-EC2 | Run with attacker hash-power share at or above a simple majority of total network hash power | Expected to succeed in disrupting PoW consensus, validating the theoretical hash-power-majority expectation from Epic 1's research |
+| TC-1.9 | UC-1-EC3 (registration flood origin) | Send the 100-peer `POST /peers/register` flood (a) from an attacker container on the Docker network, then (b) from the Docker host, while the harness verifier reads the victim node from the host | (a) The flood does not push the verifier's host reads over the Epic 6 per-IP limit (separate source IP): no 429 on the verifier's `GET /node/info`, `GET /documents/{hash}`; (b) the host flood shares the verifier's source IP, exhausts 100 requests per 60 s and yields 429 (expected, recorded as such, not as an attack outcome); the run protocol requires the flood to originate from a container |
 
 ---
 
@@ -33,6 +34,7 @@ This document covers the attack scenario scripts and reporting pipeline run agai
 | TC-2.6 | UC-2-E1 | Test f=2 attacker-controlled seats against a fixed n=4 cluster (violates `n ≥ 3f+1`) | Run is recorded as an intentional, clearly-labeled boundary/over-limit test point — NOT reported as an implementation vulnerability |
 | TC-2.7 | UC-2-EC1 | Set attacker seat fraction exactly at the theoretical safety boundary `f = floor((n-1)/3)` (Byzantine variant) | Consensus is NOT disrupted, confirming the theoretical guarantee; a contrary result is itself flagged as a critical must-report finding |
 | TC-2.8 | UC-2-EC2 (central C-4 negative-control test) | Attacker containers register via `POST /peers/register` in large numbers WITHOUT ever being included in the boot-time `ValidatorSet` config | Zero effect on the PBFT quorum threshold or consensus outcomes — proves `PeerInfo`-only Sybil registration is structurally powerless against PBFT |
+| TC-2.9 | UC-2-EC3 (registration flood origin) | In the PBFT negative-control run (TC-2.8), send the 100-peer registration flood (a) from a container, then (b) from the Docker host, while the verifier reads the victim node from the host | (a) No 429 on the verifier's host reads and quorum/consensus results are valid; (b) host flood yields 429 as expected from the shared source IP and is labeled a harness artifact, never a PBFT finding; the run protocol requires the flood to originate from a container |
 
 ---
 
@@ -61,6 +63,9 @@ This document covers the attack scenario scripts and reporting pipeline run agai
 | TC-4.9 | UC-4-E2 (regression guard) | Attempt to run the same tamper scenario using the attacked node's OWN local key-store as the verification source instead of the out-of-band anchor | Test harness never falls back to the local key-store — this negative check confirms the M-2 requirement's implementation is not silently bypassable |
 | TC-4.10 | UC-4-EC1 | Tamper a very early (near-genesis) block, and separately the most recently finalized block | Detection works identically regardless of the tampered block's position in the chain |
 | TC-4.11 | UC-4-EC2 | Introduce multiple simultaneous tamper points in a single run | Validation correctly reports the EARLIEST failing index and `failure_type`; a follow-up scan after resolving the earliest issue reveals the subsequent ones |
+| TC-4.12 | UC-4-EC3 (insider hash capture) | Institution A (attacker, node A) issues hash H first; then institution B submits the same H at its node; then look up H via `GET /documents/H` on every node and on the Verify UI | A's record is finalized on all nodes with `issuer_id = issuer_A`; B's `POST /documents` returns `409 Conflict`; every lookup and the Verify UI show A's `issuer_id` and `issuer_name` (never reassigned to B); no chain validation failure occurs; outcome recorded as "not prevented by design (known limitation)", narrated as a thesis finding, not an implementation defect and not a failed test |
+| TC-4.13 | UC-4-C (tamper self-heal) | Run the tamper (TC-4.1) against node X while stopped; first run the harness's out-of-band check on the store file; restart X with peers reachable | Out-of-band check reports invalid at the tampered index (tamper was detectable); harness asserts X's log line for the invalid persisted chain with `first_invalid_index` equal to the tampered block, then asserts adoption of the peer chain and persistence; X serves with `chain_valid = true`, `first_invalid_index = null`; `GET /documents/{hash}` for the tampered document returns original data with a verifying Merkle proof; outcome recorded as "detected and repaired", never "undetected" |
+| TC-4.14 | UC-4-C (no-peer variant) | Same tamper, restart X with no peer reachable within `STARTUP_SYNC_TIMEOUT_S` | X serves its local invalid chain after the timeout with a logged warning; `GET /node/info` reports `chain_valid = false` and `first_invalid_index` equal to the tampered block; outcome is the detection outcome of the primary flow (TC-4.2 to TC-4.4), recorded as "detected, not repaired" |
 
 ---
 
@@ -110,3 +115,21 @@ This document covers the attack scenario scripts and reporting pipeline run agai
 | TC-8.3 | UC-8 primary (central non-comparability statement) | Review the summary's framing of Sybil-resistance results | Explicitly states that PoW's hash-power-share metric and PBFT's `ValidatorSet`-seat-fraction metric are measured on different axes and are not directly comparable node-for-node; crash-fault (liveness) and Byzantine-fault (safety) findings for PBFT are reported as distinct classes, never merged into one generic "fault" category |
 | TC-8.4 | UC-8-E1 | Measured results contradict Epic 1's theoretical expectations | The discrepancy is explicitly documented and discussed as a finding requiring analysis, never omitted or silently smoothed over |
 | TC-8.5 | UC-8-EC1 | Insufficient runs were completed to draw a confident conclusion for one consensus mode | Summary explicitly states this limitation rather than overstating confidence in an under-tested claim |
+
+---
+
+## 9. Coverage Matrix and Totals
+
+| Section | Use case | Test cases | Count |
+|---|---|---|---|
+| 1 | UC-1 (incl. EC3, flood origin) | TC-1.1 to TC-1.9 | 9 |
+| 2 | UC-2 (incl. EC3, flood origin) | TC-2.1 to TC-2.9 | 9 |
+| 3 | UC-3 | TC-3.1 to TC-3.3 | 3 |
+| 4 | UC-4 (incl. EC3 hash capture, UC-4-C self-heal) | TC-4.1 to TC-4.14 | 14 |
+| 5 | UC-5 | TC-5.1 to TC-5.7 | 7 |
+| 6 | UC-6 | TC-6.1 to TC-6.3 | 3 |
+| 7 | UC-7 | TC-7.1 to TC-7.6 | 6 |
+| 8 | UC-8 | TC-8.1 to TC-8.5 | 5 |
+| **Total** | | | **56** |
+
+Previously 51 cases (no totals table existed); 5 added for the PRD v2.1 additions (TC-1.9, TC-2.9, TC-4.12, TC-4.13, TC-4.14).
