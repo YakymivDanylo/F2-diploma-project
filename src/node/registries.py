@@ -7,6 +7,7 @@ times (key rotation) but at most once without `retired_at`.
 from __future__ import annotations
 
 import json
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,10 @@ class KeyEntry:
   identity: str
   public_key: PublicKey
   retired_at: int | None
+  name: str | None = None  # issuer entries only: optional human-readable institution name
+
+
+MAX_NAME_LENGTH = 100
 
 
 @dataclass(frozen=True)
@@ -42,6 +47,13 @@ class ValidatorRegistry:
 @dataclass(frozen=True)
 class IssuerRegistry:
   entries: tuple[KeyEntry, ...]
+
+  def name_of(self, issuer_id: str) -> str:
+    """Display name of an issuer; falls back to `issuer_id` (no name, or unknown issuer)."""
+    for entry in self.entries:
+      if entry.identity == issuer_id and entry.name is not None:
+        return entry.name
+    return issuer_id
 
 
 def active_entry(entries: tuple[KeyEntry, ...], identity: str) -> KeyEntry | None:
@@ -63,7 +75,40 @@ def _read_object(path: Path, what: str) -> dict[str, Any]:
   return raw
 
 
-def _parse_entries(raw: object, *, what: str, id_key: str) -> tuple[KeyEntry, ...]:
+def _parse_name(item: dict[str, Any], identity: str, what: str) -> str | None:
+  if "name" not in item:
+    return None
+  name = item["name"]
+  if not isinstance(name, str):
+    raise RegistryError(f"{what}: {identity!r} has a non-string 'name'")
+  name = unicodedata.normalize("NFC", name).strip()
+  if any(unicodedata.category(ch) in ("Cc", "Cf") for ch in name):
+    raise RegistryError(f"{what}: {identity!r} has control or invisible characters in 'name'")
+  if not name:
+    raise RegistryError(f"{what}: {identity!r} has an empty 'name'")
+  if len(name) > MAX_NAME_LENGTH:
+    raise RegistryError(f"{what}: {identity!r} has a 'name' over {MAX_NAME_LENGTH} characters")
+  return name
+
+
+def _check_names(entries: list[KeyEntry], what: str) -> None:
+  """One name per issuer across its rotated entries; no two issuers share a name."""
+  by_identity: dict[str, str] = {}
+  owner: dict[str, str] = {}
+  for entry in entries:
+    if entry.name is None:
+      continue
+    known = by_identity.setdefault(entry.identity, entry.name)
+    if known != entry.name:
+      raise RegistryError(f"{what}: {entry.identity!r} has conflicting 'name' values")
+    folded = entry.name.casefold()
+    if owner.setdefault(folded, entry.identity) != entry.identity:
+      raise RegistryError(f"{what}: 'name' {entry.name!r} is used by more than one issuer")
+
+
+def _parse_entries(
+  raw: object, *, what: str, id_key: str, allow_name: bool = False
+) -> tuple[KeyEntry, ...]:
   if not isinstance(raw, list) or not raw:
     raise RegistryError(f"{what}: expected a non-empty list")
   entries: list[KeyEntry] = []
@@ -88,7 +133,10 @@ def _parse_entries(raw: object, *, what: str, id_key: str) -> tuple[KeyEntry, ..
       if identity in active:
         raise RegistryError(f"{what}: {identity!r} has more than one active (non-retired) key")
       active.add(identity)
-    entries.append(KeyEntry(identity=identity, public_key=key, retired_at=retired_at))
+    name = _parse_name(item, identity, what) if allow_name else None
+    entries.append(KeyEntry(identity=identity, public_key=key, retired_at=retired_at, name=name))
+  if allow_name:
+    _check_names(entries, what)
   return tuple(entries)
 
 
@@ -110,4 +158,6 @@ def load_validator_registry(path: Path) -> ValidatorRegistry:
 def load_issuer_registry(path: Path) -> IssuerRegistry:
   what = "IssuerRegistry"
   raw = _read_object(path, what)
-  return IssuerRegistry(entries=_parse_entries(raw.get("issuers"), what=what, id_key="issuer_id"))
+  return IssuerRegistry(
+    entries=_parse_entries(raw.get("issuers"), what=what, id_key="issuer_id", allow_name=True)
+  )

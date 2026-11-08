@@ -14,9 +14,15 @@ _HTTP_CODES = {404: "not_found", 405: "method_not_allowed"}
 
 class ApiError(Exception):
   def __init__(
-    self, status_code: int, code: str, message: str, details: dict[str, Any] | None = None
+    self,
+    status_code: int,
+    code: str,
+    message: str,
+    details: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
   ) -> None:
     super().__init__(message)
+    self.headers = headers
     self.status_code = status_code
     self.code = code
     self.message = message
@@ -31,7 +37,9 @@ def install_error_handlers(app: FastAPI) -> None:
   @app.exception_handler(ApiError)
   async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
     return JSONResponse(
-      status_code=exc.status_code, content=error_body(exc.code, exc.message, exc.details)
+      status_code=exc.status_code,
+      content=error_body(exc.code, exc.message, exc.details),
+      headers=exc.headers,
     )
 
   @app.exception_handler(RequestValidationError)

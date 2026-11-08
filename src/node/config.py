@@ -34,6 +34,8 @@ class NodeConfig:
   max_page_size: int
   max_metadata_bytes: int
   max_future_skew_ms: int
+  mempool_max_size: int
+  forward_ack_timeout_ms: int  # wait for the primary's reply to a forwarded record
   init_chain: bool  # explicit initialization: only then may a missing chain become genesis
 
 
@@ -63,6 +65,18 @@ def _int(
     bound = f">= {minimum}" if maximum is None else f"in [{minimum}, {maximum}]"
     raise ConfigError(f"{key} must be {bound}, got {value}")
   return value
+
+
+def _strict_int(
+  env: Mapping[str, str], key: str, default: int, *, minimum: int, maximum: int | None = None
+) -> int:
+  """Like `_int`, but a present-yet-blank value fails instead of falling back to the default."""
+  raw = env.get(key)
+  if raw is None:
+    return default
+  if raw.strip() == "":
+    raise ConfigError(f"{key} must not be empty")
+  return _int(env, key, None, minimum=minimum, maximum=maximum)
 
 
 def _csv(env: Mapping[str, str], key: str, default: str) -> tuple[str, ...]:
@@ -114,7 +128,11 @@ def load_config(env: Mapping[str, str] | None = None) -> NodeConfig:
     seed_peers=_csv(source, "SEED_PEERS", ""),
     cors_origins=_csv(source, "CORS_ORIGINS", "http://localhost:5173"),
     max_page_size=_int(source, "MAX_PAGE_SIZE", 100, minimum=1),
-    max_metadata_bytes=_int(source, "METADATA_MAX_BYTES", 1024, minimum=1),
+    max_metadata_bytes=_int(source, "METADATA_MAX_BYTES", 1024, minimum=1, maximum=1_048_576),
+    mempool_max_size=_int(source, "MEMPOOL_MAX_SIZE", 10_000, minimum=1),
     max_future_skew_ms=_int(source, "MAX_FUTURE_SKEW_MS", 60_000, minimum=0),
+    forward_ack_timeout_ms=_strict_int(
+      source, "FORWARD_ACK_TIMEOUT_MS", 2000, minimum=1, maximum=60_000
+    ),
     init_chain=_flag(source, "INIT_CHAIN"),
   )

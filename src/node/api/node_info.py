@@ -20,6 +20,8 @@ class NodeInfo(BaseModel):
   chain_valid: bool
   first_invalid_index: int | None
   quorum_status: str
+  issuer_id: str  # the institution this node belongs to
+  issuer_name: str
 
 
 @router.get("/node/info", response_model=NodeInfo)
@@ -38,4 +40,6 @@ async def node_info(request: Request) -> NodeInfo:
     chain_valid=snapshot.chain_valid,
     first_invalid_index=snapshot.first_invalid_index,
     quorum_status=snapshot.quorum_status,
+    issuer_id=context.config.issuer_id,
+    issuer_name=context.issuers.name_of(context.config.issuer_id),
   )

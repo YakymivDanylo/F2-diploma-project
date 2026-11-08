@@ -20,12 +20,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from blockchain_core import JsonChainStore, NodeState, public_key_to_pem, restore_node_state
 from blockchain_core.keys import PublicKey
 from node.api.chain import router as chain_router
+from node.api.documents import router as documents_router
 from node.api.node_info import router as node_info_router
 from node.api.peers import PeerOut
 from node.api.peers import router as peers_router
+from node.body_limit import BodyLimitMiddleware
 from node.config import NodeConfig, load_config
 from node.errors import install_error_handlers
+from node.forwarding import (
+  ForwardService,
+  PendingForwards,
+  PrimaryStatusProvider,
+  RecordForwarder,
+  UnavailableForwarder,
+  default_primary_status,
+)
 from node.key_resolver import CombinedKeyResolver, ResolverHolder
+from node.mempool import DocumentIndex, Mempool
 from node.peers.registry import PeerRegistry
 from node.peers.seed_registration import PeerTransport, UrllibTransport, register_with_seeds
 from node.registries import (
@@ -55,6 +66,12 @@ class NodeContext:
   validator: ChainValidator
   validity_cache: ValidityCache
   peers: PeerRegistry
+  mempool: Mempool
+  documents: DocumentIndex  # finalized hashes -> chain positions
+  forwarding: ForwardService
+  primary_status: PrimaryStatusProvider
+  submission_lock: asyncio.Lock
+  inflight: set[str]  # hashes being forwarded by this (non-primary) node
 
 
 def _same_key(a: PublicKey, b: PublicKey) -> bool:
@@ -78,7 +95,12 @@ def _cross_check_keys(
     )
 
 
-def build_node_context(config: NodeConfig) -> NodeContext:
+def build_node_context(
+  config: NodeConfig,
+  *,
+  forwarder: RecordForwarder | None = None,
+  primary_status: PrimaryStatusProvider | None = None,
+) -> NodeContext:
   validators = load_validator_registry(config.validators_path)
   issuers = load_issuer_registry(config.issuers_path)
   logger.info(
@@ -111,6 +133,7 @@ def build_node_context(config: NodeConfig) -> NodeContext:
   if not state.restored.valid:
     logger.error("persisted chain is INVALID: %s", state.restored.validation)
   logger.info("node %s started in %s mode", config.node_id, config.consensus_mode)
+  logger.info("effective FORWARD_ACK_TIMEOUT_MS=%d", config.forward_ack_timeout_ms)
   validator = ChainValidator(
     resolvers,
     expected_difficulty=config.expected_difficulty if is_pow else None,
@@ -128,6 +151,14 @@ def build_node_context(config: NodeConfig) -> NodeContext:
     validator=validator,
     validity_cache=validity_cache,
     peers=PeerRegistry(config.node_id),
+    mempool=Mempool(),
+    documents=DocumentIndex(state.restored.blocks),
+    forwarding=ForwardService(
+      forwarder or UnavailableForwarder(), PendingForwards(), config.forward_ack_timeout_ms
+    ),
+    primary_status=primary_status or default_primary_status,
+    submission_lock=asyncio.Lock(),
+    inflight=set(),
   )
 
 
@@ -136,11 +167,15 @@ def create_app(
   *,
   peer_transport: PeerTransport | None = None,
   sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+  forwarder: RecordForwarder | None = None,
+  primary_status: PrimaryStatusProvider | None = None,
 ) -> FastAPI:
-  context = build_node_context(config)  # fail fast at construction, not on first request
+  context = build_node_context(
+    config, forwarder=forwarder, primary_status=primary_status
+  )  # fail fast at construction, not on first request
 
   @asynccontextmanager
-  async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+  async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     task: asyncio.Task[None] | None = None
     if config.seed_peers:
       payload = {
@@ -162,6 +197,7 @@ def create_app(
     try:
       yield
     finally:
+      app.state.accepting = False
       if task is not None:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -169,10 +205,16 @@ def create_app(
 
   app = FastAPI(title="Document verification node", lifespan=lifespan)
   app.state.context = context
+  app.state.accepting = True  # Slice 16b holds this False until startup sync completes
   install_error_handlers(app)
   app.include_router(node_info_router)
   app.include_router(peers_router)
   app.include_router(chain_router)
+  app.include_router(documents_router)
+  # JSON escapes can inflate metadata up to ~3x its canonical size; 4x plus slack is safe.
+  app.add_middleware(
+    BodyLimitMiddleware, limits={"/documents": 4 * config.max_metadata_bytes + 1024}
+  )
   app.add_middleware(
     CORSMiddleware,
     allow_origins=list(config.cors_origins),
