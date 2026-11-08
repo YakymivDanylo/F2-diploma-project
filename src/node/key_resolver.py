@@ -49,6 +49,7 @@ class CombinedKeyResolver:
   def __init__(self, validators: ValidatorRegistry, issuers: IssuerRegistry) -> None:
     self._nodes = _group(validators.entries)
     self._issuers = _group(issuers.entries)
+    self._known_node_ids = frozenset(e.identity for e in validators.entries)
     self._active_node_ids = frozenset(
       e.identity for e in validators.entries if e.retired_at is None
     )
@@ -58,6 +59,11 @@ class CombinedKeyResolver:
 
   def resolve_issuer_key(self, issuer_id: str, at_timestamp: int) -> PublicKey | None:
     return _key_at(self._issuers.get(issuer_id, ()), at_timestamp)
+
+  @property
+  def known_node_ids(self) -> frozenset[str]:
+    """Every ValidatorSet identity, retired ones included: PeerInfo can never claim these."""
+    return self._known_node_ids
 
   @property
   def active_node_ids(self) -> frozenset[str]:

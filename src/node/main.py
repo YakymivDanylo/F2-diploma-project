@@ -13,6 +13,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +22,7 @@ from blockchain_core import (
   Block,
   JsonChainStore,
   NodeState,
+  public_key_from_pem,
   public_key_to_pem,
   restore_node_state,
 )
@@ -47,6 +49,13 @@ from node.forwarding import (
 from node.key_resolver import CombinedKeyResolver, ResolverHolder
 from node.mempool import DocumentIndex, Mempool
 from node.metrics import MetricsRecorder
+from node.network.connection_manager import Connector, PeerConnectionManager, now_ms
+from node.network.ws_blocks import (
+  BlockReceiver,
+  WebsocketsConnector,
+  broadcast_block,
+)
+from node.network.ws_blocks import router as ws_blocks_router
 from node.peers.registry import PeerRegistry
 from node.peers.seed_registration import PeerTransport, UrllibTransport, register_with_seeds
 from node.registries import (
@@ -56,7 +65,8 @@ from node.registries import (
   load_issuer_registry,
   load_validator_registry,
 )
-from node.validity_cache import ChainValidator, ValidityCache
+from node.validation_gateway import ChainValidator, ValidationGateway
+from node.validity_cache import ValidityCache
 
 logger = logging.getLogger("node")
 
@@ -83,6 +93,7 @@ class NodeContext:
   submission_lock: asyncio.Lock
   inflight: set[str]  # hashes being forwarded by this (non-primary) node
   metrics: MetricsRecorder
+  gateway: ValidationGateway
 
   def current_blocks(self) -> tuple[Block, ...]:
     """The live chain (grows as blocks are appended); the stored copy if it is unextendable."""
@@ -156,6 +167,14 @@ def build_node_context(
     validator_set=core_validator_set,
   )
   validity_cache = ValidityCache(validator)
+
+  def chain_view() -> tuple[Block, ...]:
+    chain = state.restored.chain
+    return chain.blocks if chain is not None else state.restored.blocks
+
+  gateway = ValidationGateway(
+    validator, resolvers, chain_view, max_future_skew_ms=config.max_future_skew_ms
+  )
   validity_cache.initialize(state.restored.blocks, state.restored.validation)
   return NodeContext(
     config=config,
@@ -176,6 +195,7 @@ def build_node_context(
     submission_lock=asyncio.Lock(),
     inflight=set(),
     metrics=MetricsRecorder(),
+    gateway=gateway,
   )
 
 
@@ -187,18 +207,50 @@ def create_app(
   forwarder: RecordForwarder | None = None,
   primary_status: PrimaryStatusProvider | None = None,
   mine: bool = True,
+  connector: Connector | None = None,
+  network_options: dict[str, Any] | None = None,
 ) -> FastAPI:
   context = build_node_context(
     config, forwarder=forwarder, primary_status=primary_status
   )  # fail fast at construction, not on first request
 
+  def lookup_key(node_id: str) -> PublicKey | None:
+    # Connection identity: a ValidatorSet key, else a registered PeerInfo key. Block
+    # authorship is stricter (ValidatorSet only) and is judged by the validation gateway.
+    resolver = context.resolvers.current
+    if node_id in resolver.known_node_ids:  # a validator id is never answered from PeerInfo
+      return resolver.resolve_node_key(node_id, now_ms())
+    info = next((p for p in context.peers.list() if p.node_id == node_id), None)
+    return public_key_from_pem(info.public_key.encode("ascii")) if info is not None else None
+
+  manager = PeerConnectionManager(
+    self_id=config.node_id,
+    node_key=context.state.node_key.private_key,
+    lookup_key=lookup_key,
+    peer_addresses=lambda: [(p.node_id, p.host, p.port) for p in context.peers.list()],
+    known_ids=lambda: context.resolvers.current.active_node_ids,
+    connector=connector or WebsocketsConnector(),
+    on_message=lambda peer_id, message: receiver.on_message(peer_id, message),
+    sleep=sleep,
+    **(network_options or {}),
+  )
+  announcements: set[asyncio.Task[None]] = set()
   engine: ConsensusEngine | None = None
   if mine and config.consensus_mode == "pow" and context.state.restored.chain is not None:
-    engine = PowEngine(context)
+
+    async def announce(block: Block) -> None:
+      # fire and forget: one slow peer must not delay the next block
+      task = asyncio.create_task(broadcast_block(manager, block))
+      announcements.add(task)
+      task.add_done_callback(announcements.discard)
+
+    engine = PowEngine(context, on_block_mined=announce)
+  receiver = BlockReceiver(context.gateway, engine, manager)
 
   @asynccontextmanager
   async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     task: asyncio.Task[None] | None = None
+    await manager.start()
     if engine is not None:
       await engine.start()
     if config.seed_peers:
@@ -224,6 +276,9 @@ def create_app(
       app.state.accepting = False
       if engine is not None:
         await engine.stop()
+      for task in list(announcements):
+        task.cancel()
+      await manager.stop()
       if task is not None:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -232,6 +287,8 @@ def create_app(
   app = FastAPI(title="Document verification node", lifespan=lifespan)
   app.state.context = context
   app.state.engine = engine
+  app.state.manager = manager
+  app.state.receiver = receiver
   app.state.accepting = True  # Slice 16b holds this False until startup sync completes
   install_error_handlers(app)
   app.include_router(node_info_router)
@@ -239,6 +296,7 @@ def create_app(
   app.include_router(chain_router)
   app.include_router(documents_router)
   app.include_router(metrics_router)
+  app.include_router(ws_blocks_router)
   # JSON escapes can inflate metadata up to ~3x its canonical size; 4x plus slack is safe.
   app.add_middleware(
     BodyLimitMiddleware, limits={"/documents": 4 * config.max_metadata_bytes + 1024}

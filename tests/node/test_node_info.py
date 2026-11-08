@@ -25,6 +25,7 @@ FIELDS = {
   "quorum_status",
   "issuer_id",
   "issuer_name",
+  "peer_health",
 }
 
 

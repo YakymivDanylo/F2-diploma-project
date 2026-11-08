@@ -2,8 +2,8 @@
 
 The cache is initialized at boot and updated only by append/replace events - never by a
 timer and never by a request. `ChainValidator` binds the injected consensus parameters and
-the resolver holder, so every call site validates with the same checklist and keys.
-(Slice 15 promotes this binding into the single FR-25 validation entry point.)
+the resolver holder, so every call site validates with the same checklist and keys. That
+binding lives in `node.validation_gateway`, the single FR-25 validation entry point.
 """
 
 from __future__ import annotations
@@ -11,51 +11,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from blockchain_core import (
-  Block,
-  ValidationResult,
-  ValidatorSet,
-  validate_chain,
-  validate_extension,
-)
-from node.key_resolver import ResolverHolder
+from blockchain_core import Block, ValidationResult
+from node.validation_gateway import ChainValidator
 
 QUORUM_HEALTHY = "healthy"
 QUORUM_INVALID = "quorum_invalid"  # the chain failed the commit-quorum check
-
-
-class ChainValidator:
-  def __init__(
-    self,
-    resolvers: ResolverHolder,
-    *,
-    expected_difficulty: int | None,
-    validator_set: ValidatorSet | None,
-  ) -> None:
-    self._resolvers = resolvers
-    self._expected_difficulty = expected_difficulty
-    self._validator_set = validator_set
-
-  def full(self, blocks: Sequence[Block]) -> ValidationResult:
-    resolver = self._resolvers.current  # one snapshot per validation
-    return validate_chain(
-      blocks,
-      resolve_node_key=resolver.resolve_node_key,
-      resolve_issuer_key=resolver.resolve_issuer_key,
-      expected_difficulty=self._expected_difficulty,
-      validator_set=self._validator_set,
-    )
-
-  def extension(self, trusted_tip: Block, new_blocks: Sequence[Block]) -> ValidationResult:
-    resolver = self._resolvers.current
-    return validate_extension(
-      trusted_tip,
-      new_blocks,
-      resolve_node_key=resolver.resolve_node_key,
-      resolve_issuer_key=resolver.resolve_issuer_key,
-      expected_difficulty=self._expected_difficulty,
-      validator_set=self._validator_set,
-    )
 
 
 @dataclass(frozen=True)

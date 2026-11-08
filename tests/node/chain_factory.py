@@ -50,7 +50,9 @@ def _candidate(env: NodeEnv, previous: Block, seed: int, algorithm, sealed, prop
   )
 
 
-def pow_block(env: NodeEnv, previous: Block, seed: int, *, difficulty: int = 1, proposer="node1"):
+def pow_block(
+  env: NodeEnv, previous: Block, seed: int, *, difficulty: int = 1, proposer="node1", signer=None
+):
   block = _candidate(env, previous, seed, "pow", {"nonce": 0, "difficulty": difficulty}, proposer)
   target = pow_target(difficulty)
   nonce = 0
@@ -58,7 +60,7 @@ def pow_block(env: NodeEnv, previous: Block, seed: int, *, difficulty: int = 1, 
     nonce += 1
     changed = replace(block, sealed_consensus={"nonce": nonce, "difficulty": difficulty})
     block = replace(changed, block_hash=sha256_of_canonical(changed.preimage_dict()))
-  return attach_proposer_signature(block, env.node_key.private_key)
+  return attach_proposer_signature(block, (signer or env.node_key).private_key)
 
 
 def pow_chain(env: NodeEnv, length: int, *, difficulty: int = 1, proposer="node1") -> list[Block]:

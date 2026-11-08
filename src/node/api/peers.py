@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Annotated
 
 from fastapi import APIRouter, Request
@@ -10,7 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 from blockchain_core import public_key_from_pem, public_key_to_pem
 from blockchain_core.keys import is_acceptable_public_key
 from node.errors import ApiError
-from node.peers.registry import PeerInfo, PeerKeyMismatchError
+from node.peers.registry import PeerInfo, PeerKeyMismatchError, PeerRegistryFullError
 
 router = APIRouter()
 
@@ -48,8 +49,20 @@ def _out(info: PeerInfo) -> PeerOut:
 @router.post("/peers/register", response_model=PeerList)
 async def register_peer(body: RegisterRequest, request: Request) -> PeerList:
   context = request.app.state.context
+  resolver = context.resolvers.current
+  if body.node_id != context.config.node_id and body.node_id in resolver.known_node_ids:
+    # A ValidatorSet identity can only be registered with its configured key: otherwise
+    # anyone could squat a validator's id (and its address) before the real node does.
+    configured = resolver.resolve_node_key(body.node_id, int(time.time() * 1000))
+    given = public_key_from_pem(body.public_key.encode("utf-8"))
+    if configured is None or public_key_to_pem(configured) != public_key_to_pem(given):
+      raise ApiError(
+        409, "peer_key_mismatch", f"{body.node_id!r} is a validator and the key does not match"
+      )
   try:
     context.peers.register(body.node_id, body.host, body.port, body.public_key)
+  except PeerRegistryFullError:
+    raise ApiError(503, "peer_registry_full", "the peer registry is full") from None
   except PeerKeyMismatchError:
     raise ApiError(
       409, "peer_key_mismatch", f"{body.node_id!r} is already registered with a different key"

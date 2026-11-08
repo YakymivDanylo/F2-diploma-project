@@ -188,7 +188,7 @@ This document covers the multi-node network layer: peer registration/discovery, 
 
 | # | Use Case | Test Case | Expected Result |
 |---|----------|-----------|-----------------|
-| TC-12.1 | UC-12 primary | Call `GET /node/info` on a running node | Returns all 11 fields `{node_id, algorithm, n, f, node_public_key, tip_index, chain_valid, first_invalid_index, quorum_status, issuer_id, issuer_name}` with correct values (the last two are the node's own institution; see CN-TC-MI.12) |
+| TC-12.1 | UC-12 primary | Call `GET /node/info` on a running node | Returns all 12 fields `{node_id, algorithm, n, f, node_public_key, tip_index, chain_valid, first_invalid_index, quorum_status, issuer_id, issuer_name, peer_health}` with correct values (the last two are the node's own institution; see CN-TC-MI.12) |
 | TC-12.2 | UC-12 primary (validity cache) | Append/sync a new block, then immediately call `GET /node/info` | `chain_valid`/`first_invalid_index` reflect the cached state updated by the append/sync event, not a freshly recomputed full revalidation |
 | TC-12.3 | UC-12-A | Call `GET /node/info` on a freshly started node with zero blocks beyond genesis | `tip_index` reflects the genesis block; `chain_valid = true`; `quorum_status` reflects normal/idle state |
 | TC-12.4 | UC-12-E1 | Call `GET /node/info` while the validity cache reports the chain invalid | Returns HTTP 200 (not an endpoint failure) with `chain_valid = false` and `first_invalid_index` populated |
@@ -196,7 +196,7 @@ This document covers the multi-node network layer: peer registration/discovery, 
 | TC-12.6 | UC-12-EC2 | Call `GET /node/info` on a PoW node | Reports `n`/`f` from its configured `ValidatorSet` even though unused for PoW quorum — must not be misread as PBFT-style quorum semantics |
 | TC-12.7 | UC-12-EC3 (central cache-cost test) | Measure `GET /node/info` latency on a short chain vs. a chain of several hundred blocks | Latency does not measurably scale with chain length |
 | TC-12.8 | Cross-check (FR-25/FR-26) | Present a PBFT block with insufficient `commit_signatures[]` via both a chain-sync request AND a `GET /node/info` cache read | Both paths report `failure_type = "quorum"` / `chain_valid = false` consistently |
-| CN-TC-MI.12 | UC-12 primary (11 fields), UC-1-D | Call `GET /node/info` on node2 (registry entry `issuer2` with `name = "Institution B"`) and on a node whose own registry entry has no `name` | Response has exactly the 11 fields of TC-12.1; node2 returns `issuer_id = "issuer2"` and `issuer_name = "Institution B"`; the node without a `name` returns `issuer_name` equal to its `issuer_id`; values equal those later returned for that node's records by `GET /documents/{hash}`; call remains cheap (no per-call revalidation) |
+| CN-TC-MI.12 | UC-12 primary (12 fields), UC-1-D | Call `GET /node/info` on node2 (registry entry `issuer2` with `name = "Institution B"`) and on a node whose own registry entry has no `name` | Response has exactly the 12 fields of TC-12.1; node2 returns `issuer_id = "issuer2"` and `issuer_name = "Institution B"`; the node without a `name` returns `issuer_name` equal to its `issuer_id`; values equal those later returned for that node's records by `GET /documents/{hash}`; call remains cheap (no per-call revalidation) |
 
 ---
 
@@ -355,7 +355,7 @@ Real channel between a non-primary (sender) and the primary. Check order (the co
 | UC-4-A2 / UC-4-A3 / UC-4-E7 (multi-issuer topology, PRD v2.1 additions) | cross-institution flow PoW and PBFT, own-issuer-only signing, body `issuer_id` rejected | CN-TC-MI.4 to MI.6, MI.11 | 4 |
 | UC-13 (multi-issuer topology, PRD v2.1 additions) | `issuer_name` in `GET /documents/{hash}`, fallback to `issuer_id` (also for unknown issuer) | CN-TC-MI.7 to MI.9 | 3 |
 | UC-14 (multi-issuer topology, PRD v2.1 additions) | block with records of two issuers validates | CN-TC-MI.10 | 1 |
-| UC-12 (PRD v2.1 additions) | `GET /node/info` 11 fields incl. `issuer_id`/`issuer_name` | CN-TC-MI.12 | 1 |
+| UC-12 (PRD v2.1 additions) | `GET /node/info` 12 fields incl. `issuer_id`/`issuer_name` | CN-TC-MI.12 | 1 |
 | UC-3-F, UC-3-G, UC-3-EC4, UC-3-EC5, UC-1-EC4, UC-11-EC2 (PRD v2.1 additions) | bounded startup sync, no startup deadlock, tamper self-heal (with and without peer), `INIT_CHAIN` first start only, startup order in both modes | CN-TC-MI.13 to MI.18 | 6 |
 | **New total** | | | **93** |
 

@@ -10,6 +10,10 @@ import time
 from dataclasses import dataclass, replace
 
 
+class PeerRegistryFullError(RuntimeError):
+  """The registry reached its cap; new ids are refused (existing ones can still refresh)."""
+
+
 class PeerKeyMismatchError(ValueError):
   """A known node_id re-registered with a different public key."""
 
@@ -24,8 +28,9 @@ class PeerInfo:
 
 
 class PeerRegistry:
-  def __init__(self, self_id: str) -> None:
+  def __init__(self, self_id: str, max_peers: int = 10_000) -> None:
     self._self_id = self_id
+    self._max_peers = max_peers
     self._peers: dict[str, PeerInfo] = {}
 
   def register(self, node_id: str, host: str, port: int, public_key: str) -> PeerInfo | None:
@@ -35,6 +40,8 @@ class PeerRegistry:
     now = int(time.time() * 1000)
     existing = self._peers.get(node_id)
     if existing is None:
+      if len(self._peers) >= self._max_peers:
+        raise PeerRegistryFullError(node_id)
       info = PeerInfo(node_id, host, port, public_key, now)
     elif existing.public_key != public_key:
       raise PeerKeyMismatchError(node_id)

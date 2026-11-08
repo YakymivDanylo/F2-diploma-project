@@ -408,7 +408,7 @@ This document covers the multi-node network layer built on top of Epic 2's core 
 
 ### Primary Flow (Happy Path)
 1. Caller requests `GET /node/info`.
-2. Node returns a single-call health/identity summary: `{node_id, algorithm, n, f, node_public_key, tip_index, chain_valid, first_invalid_index, quorum_status, issuer_id, issuer_name}` (11 fields; `issuer_id` and `issuer_name` are ADDITIVE, 2026-11-06).
+2. Node returns a single-call health/identity summary: `{node_id, algorithm, n, f, node_public_key, tip_index, chain_valid, first_invalid_index, quorum_status, issuer_id, issuer_name, peer_health}` (12 fields; `issuer_id` and `issuer_name` are ADDITIVE, 2026-11-06).
    - `issuer_id` / `issuer_name` — the node's OWN institution: `issuer_id` is the node's configured `ISSUER_ID` (UC-1-D) and `issuer_name` is that registry entry's `name`, defaulting to `issuer_id` when no name is configured. Served from boot config, available even on a freshly started node.
    - `node_id`, `algorithm` (`"pow"`|`"pbft"`), `n`/`f` (from the node's `ValidatorSet`, UC-1-C — for PoW nodes `n`/`f` reflect the configured `ValidatorSet` size even though PoW does not use it for quorum), `node_public_key` (this node's `NodeKeyPair` public key).
    - `tip_index`, `chain_valid`, `first_invalid_index` — **v1.2: read from a continuously, incrementally-updated validity cache**, NOT recomputed by a full chain revalidation on every call. The cache is updated whenever a block is appended or the chain is replaced via sync (UC-3/UC-14), using the identical Epic 2 UC-4 checklist (injected resolver, `expected_difficulty`/`ValidatorSet`, including PBFT `commit_signatures[]` quorum verification) that backs live proposal validation and chain-sync — so the *content* of the check is identical to a full revalidation, but the *cost* of this endpoint is independent of chain length (closes second-round MINOR — prior revalidation-cost concern).
@@ -429,7 +429,7 @@ This document covers the multi-node network layer built on top of Epic 2's core 
 
 ### Data Requirements
 - **Input**: None.
-- **Output**: `{node_id, algorithm, n, f, node_public_key, tip_index, chain_valid, first_invalid_index, quorum_status, issuer_id, issuer_name}` (11 fields).
+- **Output**: `{node_id, algorithm, n, f, node_public_key, tip_index, chain_valid, first_invalid_index, quorum_status, issuer_id, issuer_name, peer_health}` (12 fields).
 - **Side Effects**: None (read-only; reads the incrementally-maintained validity cache, updated by UC-3/UC-5/UC-6/UC-14's append/sync flows — never triggers a fresh full chain-validation pass itself).
 
 ---
