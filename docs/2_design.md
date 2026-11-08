@@ -9,20 +9,25 @@
 <a id="diagram-level1"></a>
 
 ```mermaid
-C4Context
-    title Рівень 1. System Context: система верифікації документів
+flowchart LR
+    issuer(["<b>Емітент</b><br/>Person<br/>Заклад освіти; подає хеш документа"])
+    verifier(["<b>Верифікатор</b><br/>Person<br/>Перевіряє автентичність документа"])
+    operator(["<b>Оператор вузла</b><br/>Person<br/>Розгортає вузол, моніторить мережу"])
+    attacker(["<b>Зловмисник</b><br/>Person_Ext<br/>Модель загроз: Sybil, backdating"])
 
-    Person(issuer, "Емітент", "Заклад освіти; подає хеш документа на видачу")
-    Person(verifier, "Верифікатор", "Будь-яка сторона, що перевіряє автентичність документа")
-    Person(operator, "Оператор вузла", "Розгортає вузол і моніторить мережу")
-    Person_Ext(attacker, "Зловмисник", "Модель загроз: Sybil-атака, backdating")
+    sys["<b>Блокчейн-система верифікації документів</b><br/>System<br/>P2P-мережа вузлів-валідаторів (по одному на заклад),<br/>SPA, контур спостережуваності, компонент симуляції атак"]
 
-    System(sys, "Блокчейн-система верифікації документів", "P2P-мережа вузлів-валідаторів (по одному на заклад), SPA, контур спостережуваності, компонент симуляції атак")
+    issuer -->|"Подає хеш документа<br/>HTTPS / REST, TLS 1.3"| sys
+    verifier -->|"Перевіряє документ за хешем і Merkle proof<br/>HTTPS / REST, TLS 1.3"| sys
+    operator -->|"Розгортає (docker compose), дивиться дашборд Grafana<br/>docker compose CLI; HTTPS"| sys
+    attacker -.->|"Підключає сторонні вузли, підробляє блоки<br/>REST / HTTPS; WebSocket / wss"| sys
 
-    Rel(issuer, sys, "Подає хеш документа на видачу", "HTTPS / REST, TLS 1.3")
-    Rel(verifier, sys, "Перевіряє документ за хешем та Merkle proof", "HTTPS / REST, TLS 1.3")
-    Rel(operator, sys, "Розгортає (docker compose) і моніторить (дашборд Grafana)", "docker compose CLI; HTTPS")
-    Rel(attacker, sys, "Підключає сторонні вузли; змінює або підробляє блоки", "REST / HTTPS; WebSocket / wss")
+    classDef person fill:#dbeafe,stroke:#1d4ed8,color:#0f172a;
+    classDef ext fill:#fee2e2,stroke:#b91c1c,color:#0f172a;
+    classDef system fill:#d1fae5,stroke:#047857,color:#0f172a;
+    class issuer,verifier,operator person;
+    class attacker ext;
+    class sys system;
 ```
 
 **Опис елементів.**
@@ -40,67 +45,65 @@ C4Context
 <a id="diagram-level2"></a>
 
 ```mermaid
-C4Container
-    title Рівень 2. Container: розгортання docker compose (n = 4, f = 1)
+flowchart TB
+    issuer(["<b>Емітент</b><br/>Person"])
+    verifier(["<b>Верифікатор</b><br/>Person"])
+    operator(["<b>Оператор вузла</b><br/>Person"])
+    attacker_actor(["<b>Зловмисник</b><br/>Person_Ext"])
 
-    Person(issuer, "Емітент", "Заклад освіти")
-    Person(verifier, "Верифікатор", "Перевіряє документ")
-    Person(operator, "Оператор вузла", "Адміністратор розгортання")
-    Person_Ext(attacker_actor, "Зловмисник", "Модель загроз")
+    subgraph compose["docker compose, один хост"]
+        direction TB
+        spa_host["<b>SPA Host</b><br/>nginx<br/>Статика SPA; CSP"]
+        spa["<b>SPA</b><br/>React, TypeScript (браузер)<br/>Хешування, видача, верифікація,<br/>візуалізація, підписка на блоки"]
 
-    System_Boundary(compose, "docker compose, один хост") {
+        subgraph p2p["P2P-мережа валідаторів: по одному вузлу на заклад"]
+            direction TB
+            mesh(("<b>Повнозв'язна сітка</b><br/>6 пар вузлів<br/>/ws/pbft, /ws/blocks, GET /chain<br/>wss + HTTPS, TLS 1.3"))
+            node1["<b>Вузол 1</b> (заклад A)<br/>Python 3, FastAPI, asyncio<br/>REST + WebSocket; PoW або PBFT"]
+            node2["<b>Вузол 2</b> (заклад B)<br/>Python 3, FastAPI, asyncio"]
+            node3["<b>Вузол 3</b> (заклад C)<br/>Python 3, FastAPI, asyncio"]
+            node4["<b>Вузол 4</b> (заклад D)<br/>Python 3, FastAPI, asyncio"]
+            vol1[("<b>Том вузла 1</b><br/>ChainStore JSON/SQLite, v2<br/>ключі 0600, знімки")]
+            vol2[("<b>Том вузла 2</b>")]
+            vol3[("<b>Том вузла 3</b>")]
+            vol4[("<b>Том вузла 4</b>")]
+            mesh <--> node1
+            mesh <--> node2
+            mesh <--> node3
+            mesh <--> node4
+            node1 -->|"Файловий I/O"| vol1
+            node2 -->|"Файловий I/O"| vol2
+            node3 -->|"Файловий I/O"| vol3
+            node4 -->|"Файловий I/O"| vol4
+        end
 
-        Container(spa_host, "SPA Host", "nginx", "Віддає статичні файли SPA; заголовки CSP, X-Content-Type-Options")
-        Container(spa, "SPA", "React, TypeScript; виконується в браузері", "Хешування SHA-256 у браузері, видача, верифікація, візуалізація ланцюга; підписка на блоки")
+        prometheus["<b>Prometheus</b><br/>Збирає метрики вузлів"]
+        grafana["<b>Grafana</b><br/>Провізований дашборд"]
+        attacker["<b>Компонент атак</b><br/>Python 3, окремий образ<br/>Sybil та backdating"]
+        results[("<b>Результати атак</b><br/>results/attack_runs.csv")]
+    end
 
-        Boundary(p2p, "P2P-мережа валідаторів: по одному вузлу на заклад") {
-            Container(node1, "Вузол 1 (заклад A)", "Python 3, FastAPI, asyncio", "REST + WebSocket; консенсус PoW або PBFT; підпис записів ключем емітента закладу")
-            ContainerDb(vol1, "Том вузла 1", "ChainStore: JSON або SQLite, формат v2; ключі 0600; знімки", "Ланцюг, IssuerKeyPair, NodeKeyPair, знімки")
-            Container(node2, "Вузол 2 (заклад B)", "Python 3, FastAPI, asyncio", "REST + WebSocket; консенсус PoW або PBFT")
-            ContainerDb(vol2, "Том вузла 2", "ChainStore: JSON або SQLite, формат v2; ключі 0600; знімки", "Ланцюг, ключі, знімки")
-            Container(node3, "Вузол 3 (заклад C)", "Python 3, FastAPI, asyncio", "REST + WebSocket; консенсус PoW або PBFT")
-            ContainerDb(vol3, "Том вузла 3", "ChainStore: JSON або SQLite, формат v2; ключі 0600; знімки", "Ланцюг, ключі, знімки")
-            Container(node4, "Вузол 4 (заклад D)", "Python 3, FastAPI, asyncio", "REST + WebSocket; консенсус PoW або PBFT")
-            ContainerDb(vol4, "Том вузла 4", "ChainStore: JSON або SQLite, формат v2; ключі 0600; знімки", "Ланцюг, ключі, знімки")
-        }
+    issuer -->|"Подає хеш<br/>HTTPS, браузер"| spa
+    verifier -->|"Перевіряє документ<br/>HTTPS, браузер"| spa
+    spa_host -->|"Віддає статику<br/>HTTPS, TLS 1.3"| spa
+    spa -->|"REST/JSON, HTTPS; /ws/blocks, wss<br/>TLS 1.3; вузол обирає користувач"| p2p
+    prometheus -->|"GET /metrics<br/>HTTPS, TLS 1.3"| p2p
+    grafana -->|"PromQL / HTTPS"| prometheus
+    operator -->|"Дашборд<br/>HTTPS"| grafana
+    attacker_actor -.->|"Запускає сценарій<br/>docker compose run"| attacker
+    attacker -.->|"Sybil; блок із підробленою міткою часу<br/>wss; REST / HTTPS; backdating через спільний том"| p2p
+    attacker -->|"Записує результати<br/>файловий I/O"| results
 
-        Container(prometheus, "Prometheus", "Prometheus", "Збирає метрики вузлів")
-        Container(grafana, "Grafana", "Grafana", "Провізований дашборд: висота ланцюга, з'єднання, час консенсусу")
-        Container(attacker, "Компонент атак", "Python 3; окремий Docker-образ", "Сценарії Sybil та backdating")
-        ContainerDb(results, "Результати атак", "CSV-файл у томі", "results/attack_runs.csv")
-    }
-
-    Rel(issuer, spa, "Подає хеш документа на видачу", "HTTPS, браузер")
-    Rel(verifier, spa, "Перевіряє документ за хешем", "HTTPS, браузер")
-    Rel(spa_host, spa, "Віддає статичні файли SPA", "HTTPS, TLS 1.3")
-    Rel(spa, node1, "POST /documents, GET /documents/{hash}, GET /chain, GET /node/info; підписка на блоки /ws/blocks", "REST / JSON, HTTPS; WebSocket, wss, TLS 1.3")
-    Rel(spa, node2, "Те саме; вузол обирається користувачем", "REST / JSON, HTTPS; WebSocket, wss, TLS 1.3")
-    Rel(spa, node3, "Те саме; вузол обирається користувачем", "REST / JSON, HTTPS; WebSocket, wss, TLS 1.3")
-    Rel(spa, node4, "Те саме; вузол обирається користувачем", "REST / JSON, HTTPS; WebSocket, wss, TLS 1.3")
-
-    BiRel(node1, node2, "PBFT /ws/pbft; блоки /ws/blocks; синхронізація GET /chain", "wss + HTTPS, TLS 1.3")
-    BiRel(node1, node3, "PBFT /ws/pbft; блоки /ws/blocks; синхронізація GET /chain", "wss + HTTPS, TLS 1.3")
-    BiRel(node1, node4, "PBFT /ws/pbft; блоки /ws/blocks; синхронізація GET /chain", "wss + HTTPS, TLS 1.3")
-    BiRel(node2, node3, "PBFT /ws/pbft; блоки /ws/blocks; синхронізація GET /chain", "wss + HTTPS, TLS 1.3")
-    BiRel(node2, node4, "PBFT /ws/pbft; блоки /ws/blocks; синхронізація GET /chain", "wss + HTTPS, TLS 1.3")
-    BiRel(node3, node4, "PBFT /ws/pbft; блоки /ws/blocks; синхронізація GET /chain", "wss + HTTPS, TLS 1.3")
-
-    Rel(node1, vol1, "Додає блоки; читає ланцюг і ключі під час старту; пише знімки", "Файловий I/O")
-    Rel(node2, vol2, "Додає блоки; читає ланцюг і ключі; пише знімки", "Файловий I/O")
-    Rel(node3, vol3, "Додає блоки; читає ланцюг і ключі; пише знімки", "Файловий I/O")
-    Rel(node4, vol4, "Додає блоки; читає ланцюг і ключі; пише знімки", "Файловий I/O")
-
-    Rel(prometheus, node1, "Опитує GET /metrics", "HTTPS, TLS 1.3")
-    Rel(prometheus, node2, "Опитує GET /metrics", "HTTPS, TLS 1.3")
-    Rel(prometheus, node3, "Опитує GET /metrics", "HTTPS, TLS 1.3")
-    Rel(prometheus, node4, "Опитує GET /metrics", "HTTPS, TLS 1.3")
-    Rel(grafana, prometheus, "Запити метрик", "PromQL / HTTPS")
-    Rel(operator, grafana, "Переглядає дашборд", "HTTPS")
-
-    Rel(attacker, node1, "Sybil-підключення; ін'єкція блоку з підробленою міткою часу", "wss; REST / HTTPS")
-    Rel(attacker, vol1, "Змінює збережений ланцюг (backdating, варіант а)", "Файловий I/O, спільний том")
-    Rel(attacker, results, "Записує результати запусків", "Файловий I/O")
-    Rel(attacker_actor, attacker, "Запускає сценарій (у моделі загроз; фактично запускає оператор)", "docker compose run")
+    classDef person fill:#dbeafe,stroke:#1d4ed8,color:#0f172a;
+    classDef ext fill:#fee2e2,stroke:#b91c1c,color:#0f172a;
+    classDef cont fill:#d1fae5,stroke:#047857,color:#0f172a;
+    classDef db fill:#fef3c7,stroke:#b45309,color:#0f172a;
+    classDef bus fill:#f3f4f6,stroke:#4b5563,color:#0f172a;
+    class issuer,verifier,operator person;
+    class attacker_actor,attacker ext;
+    class spa_host,spa,node1,node2,node3,node4,prometheus,grafana cont;
+    class vol1,vol2,vol3,vol4,results db;
+    class mesh bus;
 ```
 
 **Опис контейнерів.**
@@ -116,7 +119,7 @@ C4Container
 | Компонент атак | Python 3, окремий образ | Сценарії Sybil та backdating (а, б); не входить до образу вузла | [SRS-FUN-61…64](srs.md#srs-fun-61) |
 | Результати атак | CSV у томі | `results/attack_runs.csv` | [SRS-FUN-63](srs.md#srs-fun-63) |
 
-**Міжвузлові канали** (на діаграмі кожна пара вузлів з'єднана одним двоспрямованим зв'язком, що об'єднує три канали):
+**Міжвузлові канали** (на діаграмі повнозв'язна сітка з 6 пар вузлів показана одним вузлом-шиною; кожна пара використовує всі три канали):
 
 | Канал | Протокол | Призначення | Вимоги |
 |---|---|---|---|
@@ -139,136 +142,131 @@ C4Container
 <a id="diagram-level3"></a>
 
 ```mermaid
-C4Component
-    title Рівень 3. Component: контейнер «Вузол» (Python 3, FastAPI, asyncio)
+flowchart TB
+    spa(["<b>SPA</b><br/>браузер"])
+    peers(["<b>Вузли-піри, компонент атак</b>"])
+    prom(["<b>Prometheus</b>"])
 
-    Container_Ext(spa, "SPA", "React; браузер", "Клієнт REST та підписник /ws/blocks")
-    Container_Ext(peers, "Вузли-піри та компонент атак", "FastAPI", "Клієнти wss та HTTPS")
-    Container_Ext(prom, "Prometheus", "Prometheus", "Опитування метрик")
-    ContainerDb_Ext(vol, "Том вузла", "Файловий журнал; ключі 0600", "Ланцюг, ключі, знімки")
+    subgraph node["Контейнер «Вузол» (Python 3, FastAPI, asyncio)"]
+        direction TB
 
-    Container_Boundary(node, "Вузол") {
+        subgraph pres["Шар Presentation"]
+            direction LR
+            mw["<b>Middleware</b><br/>RateLimitMiddleware, GlobalErrorHandler"]
+            ctrl["<b>Контролери</b><br/>Documents, Chain, NodeInfo, Peers, Metrics"]
+            auth["<b>PeerAuthenticator</b><br/>Guard: підпис NodeKeyPair"]
+            og["<b>OriginGuard</b><br/>Guard: Origin"]
+            wsb["<b>WsBlocksEndpoint</b><br/>/ws/blocks"]
+            wsp["<b>WsPbftEndpoint</b><br/>/ws/pbft"]
+        end
 
-        Boundary(pres, "Шар Presentation") {
-            Component(rl, "RateLimitMiddleware", "ASGI middleware", "100 запитів/60 с на IP; обробляє scope http та websocket; 429 + Retry-After")
-            Component(eh, "GlobalErrorHandler", "FastAPI exception handlers", "Єдиний формат помилок; структуроване журналювання з correlation id")
-            Component(docc, "DocumentsController", "FastAPI router, Pydantic DTO", "POST /documents, GET /documents/{hash}")
-            Component(chainc, "ChainController", "FastAPI router, Pydantic DTO", "GET /chain?from=&to=")
-            Component(infoc, "NodeInfoController", "FastAPI router", "GET /node/info; healthcheck")
-            Component(peersc, "PeersController", "FastAPI router, Pydantic DTO", "POST /peers/register, GET /peers")
-            Component(metc, "MetricsEndpoint", "FastAPI router", "GET /metrics")
-            Component(auth, "PeerAuthenticator", "Guard", "Підпис NodeKeyPair з domain tag, належність до ValidatorSet")
-            Component(og, "OriginGuard", "Guard", "Перевірка заголовка Origin у рукостисканні /ws/blocks для браузерних клієнтів")
-            Component(wsb, "WsBlocksEndpoint", "FastAPI WebSocket", "/ws/blocks: блоки від піров; розсилка підписникам, зокрема SPA (лише читання)")
-            Component(wsp, "WsPbftEndpoint", "FastAPI WebSocket", "/ws/pbft, forward_record")
-        }
+        subgraph app["Шар Application"]
+            direction TB
+            iss["<b>IssuanceService</b>"]
+            cq["<b>ChainQueryService</b><br/>лише читання"]
+            ing["<b>BlockIngestionService</b><br/>єдина точка входу блоків"]
+            cs["<b>ChainState</b><br/>asyncio.Lock"]
+            coord["<b>ConsensusCoordinator</b><br/>Strategy"]
+            strat["<b>PowStrategy, PbftStrategy</b>"]
+            mpf["<b>Mempool, RecordForwarder</b>"]
+            syn["<b>SyncService, PeerRegistry</b>"]
+            boot["<b>StartupCoordinator</b>"]
+            bus["<b>EventBus</b><br/>Observer"]
+            snap["<b>SnapshotTask</b>"]
+            pRepo{{"<b>ChainRepository</b><br/>порт"}}
+            pGw{{"<b>PeerGateway</b><br/>порт"}}
+            pMet{{"<b>MetricsPort</b><br/>порт"}}
+            pKey{{"<b>KeyProvider</b><br/>порт"}}
+        end
 
-        Boundary(app, "Шар Application") {
-            Component(iss, "IssuanceService", "Python", "Перевірка емітента, підпис запису, дублікати, постановка в mempool або пересилання")
-            Component(cq, "ChainQueryService", "Python", "Пошук документа, Merkle proof, діапазон блоків, стан вузла (лише читання)")
-            Component(ing, "BlockIngestionService", "Python", "Єдина точка входу блоків: валідація, потім додавання; межа майбутньої мітки часу лише для нових блоків")
-            Component(boot, "StartupCoordinator", "Python, asyncio", "INIT_CHAIN, перехресна перевірка ключів, синхронізація з піра перед обслуговуванням")
-            Component(cs, "ChainState", "Python, asyncio.Lock", "Єдиний власник ланцюга в пам'яті, єдиний запис під блокуванням")
-            Component(coord, "ConsensusCoordinator", "Python, Strategy", "Обирає стратегію за конфігурацією; формує блок з mempool")
-            Component(pow, "PowStrategy", "Python", "Підбір nonce; difficulty у бітах [1, 256]")
-            Component(pbft, "PbftStrategy", "Python", "pre-prepare, prepare, commit, view-change")
-            Component(mp, "Mempool", "Python", "Черга записів очікування; відхиляє дублікати")
-            Component(fwd, "RecordForwarder", "Python", "Пересилання запису primary з відповіддю за request_id")
-            Component(sync, "SyncService", "Python, asyncio", "Отримання відсутніх блоків, розв'язання розгалужень")
-            Component(preg, "PeerRegistry", "Python", "PeerInfo: лише розсилка, не кворум")
-            Component(bus, "EventBus", "Python, Observer", "Подія BlockAppended")
-            Component(snap, "SnapshotTask", "Python, asyncio", "Знімок кожні SNAPSHOT_INTERVAL_MIN хв")
-            Component(pRepo, "ChainRepository", "Python Protocol (порт)", "append, load, snapshot")
-            Component(pGw, "PeerGateway", "Python Protocol (порт)", "broadcast, send, fetch_chain")
-            Component(pMet, "MetricsPort", "Python Protocol (порт)", "observe, render")
-            Component(pKey, "KeyProvider", "Python Protocol (порт)", "IssuerKeyPair, NodeKeyPair")
-        }
+        subgraph core["src/blockchain_core: бібліотека без залежності від вузла"]
+            lib["<b>ChainValidator, MerkleTree, SignatureService</b>"]
+        end
 
-        Boundary(core, "src/blockchain_core: бібліотека без залежності від вузла") {
-            Component(val, "ChainValidator", "Python", "Порядок: hash, link, difficulty, merkle, signature, structural, quorum; кворум з ValidatorSet.quorum")
-            Component(merkle, "MerkleTree", "Python", "Domain separation 0x00 та 0x01; proof")
-            Component(sig, "SignatureService", "Python, cryptography", "ECDSA P-256: підпис і перевірка")
-        }
+        subgraph infra["Шар Infrastructure"]
+            direction LR
+            cfg["<b>NodeConfig, KeyResolver</b>"]
+            repo["<b>ChainStoreAdapter</b>"]
+            gw["<b>PeerGatewayAdapter</b>"]
+            metx["<b>PrometheusMetrics</b>"]
+            keyst["<b>KeyStore</b>"]
+        end
+    end
 
-        Boundary(infra, "Шар Infrastructure") {
-            Component(cfg, "NodeConfig", "Python", "ValidatorSet, IssuerRegistry, algorithm, expected_difficulty; перевірка при старті")
-            Component(kr, "KeyResolver", "Python", "resolve(id, at_timestamp) за ValidatorSet та IssuerRegistry")
-            Component(repo, "ChainStoreAdapter", "Python", "ChainStore: бекенди JSON і SQLite, формат v2, блокування single-writer")
-            Component(gw, "PeerGatewayAdapter", "websockets, httpx", "Вихідні wss та HTTPS з перепідключенням")
-            Component(metx, "PrometheusMetrics", "prometheus_client", "Реєстр метрик без PII")
-            Component(keyst, "KeyStore", "Python", "Читання ключів з тому (0600)")
-        }
-    }
+    vol[("<b>Том вузла</b><br/>ланцюг, ключі, знімки")]
+    peersOut(["<b>Вузли-піри</b><br/>вихідні з'єднання"])
 
-    Rel(spa, rl, "Запити REST", "HTTPS / JSON, TLS 1.3")
-    Rel(spa, rl, "Підписка на блоки /ws/blocks", "wss, TLS 1.3")
-    Rel(peers, rl, "Підключення WebSocket та REST", "wss; HTTPS, TLS 1.3")
-    Rel(prom, rl, "GET /metrics", "HTTPS, TLS 1.3")
-    Rel(rl, eh, "Передає запит далі", "ASGI")
-    Rel(eh, docc, "Маршрутизує", "ASGI")
-    Rel(eh, chainc, "Маршрутизує", "ASGI")
-    Rel(eh, infoc, "Маршрутизує", "ASGI")
-    Rel(eh, peersc, "Маршрутизує", "ASGI")
-    Rel(eh, metc, "Маршрутизує", "ASGI")
-    Rel(eh, auth, "Маршрутизує WebSocket піра", "ASGI")
-    Rel(eh, og, "Маршрутизує WebSocket клієнта", "ASGI")
-    Rel(auth, wsb, "Пропускає автентифіковане повідомлення", "виклик у процесі")
-    Rel(auth, wsp, "Пропускає автентифіковане повідомлення", "виклик у процесі")
-    Rel(og, wsb, "Пропускає підписку (лише читання)", "виклик у процесі")
+    spa -->|"REST; /ws/blocks<br/>HTTPS, wss, TLS 1.3"| mw
+    peers -->|"REST; WebSocket<br/>HTTPS, wss, TLS 1.3"| mw
+    prom -->|"GET /metrics<br/>HTTPS, TLS 1.3"| mw
+    mw -->|"ASGI"| ctrl
+    mw -->|"ASGI: піри"| auth
+    mw -->|"ASGI: браузер"| og
+    auth -->|"виклик"| wsb
+    auth -->|"виклик"| wsp
+    og -->|"лише читання"| wsb
 
-    Rel(docc, iss, "submit_document(hash, metadata)", "виклик у процесі")
-    Rel(docc, cq, "get_document(hash)", "виклик у процесі")
-    Rel(chainc, cq, "get_range(from, to)", "виклик у процесі")
-    Rel(infoc, cq, "get_node_info()", "виклик у процесі")
-    Rel(peersc, preg, "register(peer), list()", "виклик у процесі")
-    Rel(metc, pMet, "render()", "виклик через порт")
+    ctrl -->|"submit_document"| iss
+    ctrl -->|"get_document, get_range"| cq
+    ctrl -->|"register, list"| syn
+    iss -->|"has_hash"| cq
+    iss -->|"черга або forward_record"| mpf
+    iss -->|"підпис ECDSA"| lib
+    iss -->|"ключ емітента"| pKey
+    cq -->|"читає"| cs
+    cq -->|"Merkle proof"| lib
 
-    Rel(iss, pKey, "Отримує IssuerKeyPair", "виклик через порт")
-    Rel(iss, sig, "Підписує DocumentRecord", "ECDSA P-256")
-    Rel(iss, cq, "has_hash(hash): дублікат у ланцюгу", "виклик у процесі")
-    Rel(iss, mp, "Ставить запис у чергу (primary або PoW)", "виклик у процесі")
-    Rel(iss, fwd, "Пересилає запис primary (не-primary PBFT)", "виклик у процесі")
-    Rel(cq, cs, "Читає стан", "інтерфейс лише читання")
-    Rel(cq, merkle, "Будує Merkle proof", "виклик бібліотеки")
+    wsb -->|"submit_block"| ing
+    wsp -->|"asyncio.Queue"| coord
+    coord -->|"делегує"| strat
+    coord -->|"take_batch"| mpf
+    strat -->|"submit_block"| ing
+    strat -->|"PBFT-повідомлення"| pGw
+    mpf -->|"forward_record"| pGw
+    syn -->|"submit_chain"| ing
+    syn -->|"fetch_chain"| pGw
+    boot -->|"sync"| syn
+    boot -->|"load; INIT_CHAIN"| pRepo
+    boot -->|"перевірка ключів"| cfg
 
-    Rel(wsb, ing, "submit_block(block)", "виклик у процесі")
-    Rel(wsp, coord, "on_message(PBFT-повідомлення)", "asyncio.Queue")
-    Rel(coord, pow, "Делегує (algorithm = pow)", "Strategy")
-    Rel(coord, pbft, "Делегує (algorithm = pbft)", "Strategy")
-    Rel(coord, mp, "take_batch(до 256 записів)", "виклик у процесі")
-    Rel(pow, ing, "submit_block(змайнений блок)", "виклик у процесі")
-    Rel(pbft, ing, "submit_block(блок із commit_signatures)", "виклик у процесі")
-    Rel(pbft, pGw, "Розсилає PBFT-повідомлення", "виклик через порт")
-    Rel(fwd, pGw, "forward_record primary", "виклик через порт")
-    Rel(sync, pGw, "fetch_chain(from, to)", "виклик через порт")
-    Rel(sync, ing, "submit_chain(кандидат)", "виклик у процесі")
-    Rel(boot, sync, "Синхронізація перед обслуговуванням", "виклик у процесі")
-    Rel(boot, pRepo, "load; allow_fresh лише при INIT_CHAIN", "виклик через порт")
-    Rel(boot, kr, "Перехресна перевірка ключів за реєстрами", "виклик у процесі")
+    ing -->|"ValidatorSet, ключі"| cfg
+    ing -->|"validate"| lib
+    ing -->|"append"| cs
+    ing -->|"BlockAppended"| bus
+    bus -->|"метрики"| pMet
+    bus -->|"розсилка блоку"| pGw
+    cs -->|"persist, load"| pRepo
+    snap -->|"копія"| cs
+    snap -->|"write_snapshot"| pRepo
 
-    Rel(ing, cfg, "Читає ValidatorSet, expected_difficulty", "параметри, що передаються в бібліотеку")
-    Rel(ing, kr, "Отримує resolver ключів", "параметр, що передається в бібліотеку")
-    Rel(ing, val, "validate_block / validate_chain", "виклик бібліотеки")
-    Rel(ing, cs, "append / replace під блокуванням", "виклик у процесі")
-    Rel(ing, bus, "Публікує BlockAppended", "Observer")
-    Rel(val, merkle, "Перераховує корінь", "виклик у процесі")
-    Rel(val, sig, "Перевіряє підписи", "виклик у процесі")
-    Rel(kr, cfg, "Читає реєстри", "виклик у процесі")
+    pRepo -.-|"реалізує адаптер"| repo
+    pGw -.-|"реалізує адаптер"| gw
+    pMet -.-|"реалізує адаптер"| metx
+    pKey -.-|"реалізує адаптер"| keyst
+    repo -->|"файловий I/O"| vol
+    keyst -->|"файловий I/O"| vol
+    gw -->|"wss; HTTPS, TLS 1.3"| peersOut
 
-    Rel(bus, pMet, "Оновлює метрики", "Observer")
-    Rel(bus, pGw, "Розсилає блок підключеним вузлам", "Observer")
-    Rel(cs, pRepo, "persist / load", "виклик через порт")
-    Rel(snap, cs, "Копія стану під блокуванням", "виклик у процесі")
-    Rel(snap, pRepo, "write_snapshot", "виклик через порт")
+    pRepo ~~~ lib
+    pGw ~~~ lib
+    pMet ~~~ lib
+    pKey ~~~ lib
+    lib ~~~ cfg
+    lib ~~~ repo
+    lib ~~~ gw
+    lib ~~~ metx
+    lib ~~~ keyst
 
-    Rel(repo, pRepo, "Реалізує", "Python Protocol")
-    Rel(gw, pGw, "Реалізує", "Python Protocol")
-    Rel(metx, pMet, "Реалізує", "Python Protocol")
-    Rel(keyst, pKey, "Реалізує", "Python Protocol")
-    Rel(repo, vol, "Додає блоки; читає при старті", "Файловий I/O")
-    Rel(keyst, vol, "Читає ключі", "Файловий I/O")
-    Rel(gw, peers, "Вихідні wss та HTTPS", "wss; HTTPS, TLS 1.3")
+    classDef ext fill:#e5e7eb,stroke:#374151,color:#0f172a;
+    classDef comp fill:#d1fae5,stroke:#047857,color:#0f172a;
+    classDef port fill:#ede9fe,stroke:#6d28d9,color:#0f172a;
+    classDef lib fill:#fef3c7,stroke:#b45309,color:#0f172a;
+    class spa,peers,prom,vol,peersOut ext;
+    class pRepo,pGw,pMet,pKey port;
+    class lib lib;
 ```
+
+На діаграмі для читабельності поруч показано близькі за роллю компоненти одним блоком (наприклад, `Middleware` = `RateLimitMiddleware` + `GlobalErrorHandler`, `Контролери` = п'ять роутерів); повний перелік і відповідальності наведено в таблиці нижче. Пунктирна лінія «реалізує адаптер» з'єднує порт шару Application з адаптером шару Infrastructure.
 
 **Опис компонентів.**
 
