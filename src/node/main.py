@@ -17,15 +17,24 @@ from dataclasses import dataclass
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from blockchain_core import JsonChainStore, NodeState, public_key_to_pem, restore_node_state
+from blockchain_core import (
+  Block,
+  JsonChainStore,
+  NodeState,
+  public_key_to_pem,
+  restore_node_state,
+)
 from blockchain_core.keys import PublicKey
 from node.api.chain import router as chain_router
 from node.api.documents import router as documents_router
+from node.api.metrics import router as metrics_router
 from node.api.node_info import router as node_info_router
 from node.api.peers import PeerOut
 from node.api.peers import router as peers_router
 from node.body_limit import BodyLimitMiddleware
 from node.config import NodeConfig, load_config
+from node.consensus.base import ConsensusEngine
+from node.consensus.pow import PowEngine
 from node.errors import install_error_handlers
 from node.forwarding import (
   ForwardService,
@@ -37,6 +46,7 @@ from node.forwarding import (
 )
 from node.key_resolver import CombinedKeyResolver, ResolverHolder
 from node.mempool import DocumentIndex, Mempool
+from node.metrics import MetricsRecorder
 from node.peers.registry import PeerRegistry
 from node.peers.seed_registration import PeerTransport, UrllibTransport, register_with_seeds
 from node.registries import (
@@ -72,6 +82,12 @@ class NodeContext:
   primary_status: PrimaryStatusProvider
   submission_lock: asyncio.Lock
   inflight: set[str]  # hashes being forwarded by this (non-primary) node
+  metrics: MetricsRecorder
+
+  def current_blocks(self) -> tuple[Block, ...]:
+    """The live chain (grows as blocks are appended); the stored copy if it is unextendable."""
+    chain = self.state.restored.chain
+    return chain.blocks if chain is not None else self.state.restored.blocks
 
 
 def _same_key(a: PublicKey, b: PublicKey) -> bool:
@@ -159,6 +175,7 @@ def build_node_context(
     primary_status=primary_status or default_primary_status,
     submission_lock=asyncio.Lock(),
     inflight=set(),
+    metrics=MetricsRecorder(),
   )
 
 
@@ -169,14 +186,21 @@ def create_app(
   sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
   forwarder: RecordForwarder | None = None,
   primary_status: PrimaryStatusProvider | None = None,
+  mine: bool = True,
 ) -> FastAPI:
   context = build_node_context(
     config, forwarder=forwarder, primary_status=primary_status
   )  # fail fast at construction, not on first request
 
+  engine: ConsensusEngine | None = None
+  if mine and config.consensus_mode == "pow" and context.state.restored.chain is not None:
+    engine = PowEngine(context)
+
   @asynccontextmanager
   async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     task: asyncio.Task[None] | None = None
+    if engine is not None:
+      await engine.start()
     if config.seed_peers:
       payload = {
         "node_id": config.node_id,
@@ -198,6 +222,8 @@ def create_app(
       yield
     finally:
       app.state.accepting = False
+      if engine is not None:
+        await engine.stop()
       if task is not None:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -205,12 +231,14 @@ def create_app(
 
   app = FastAPI(title="Document verification node", lifespan=lifespan)
   app.state.context = context
+  app.state.engine = engine
   app.state.accepting = True  # Slice 16b holds this False until startup sync completes
   install_error_handlers(app)
   app.include_router(node_info_router)
   app.include_router(peers_router)
   app.include_router(chain_router)
   app.include_router(documents_router)
+  app.include_router(metrics_router)
   # JSON escapes can inflate metadata up to ~3x its canonical size; 4x plus slack is safe.
   app.add_middleware(
     BodyLimitMiddleware, limits={"/documents": 4 * config.max_metadata_bytes + 1024}

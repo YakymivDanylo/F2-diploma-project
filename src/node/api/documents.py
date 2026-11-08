@@ -127,6 +127,9 @@ async def submit_document(body: SubmitRequest, request: Request) -> SubmitAck:
     )
     if local:
       context.mempool.add(record)
+      engine = request.app.state.engine
+      if engine is not None:
+        engine.on_submission(record)
     else:
       context.inflight.add(document_hash)  # same-hash submissions meanwhile get 409
 
@@ -172,7 +175,7 @@ async def get_document(
       "the hash appears in more than one block",
       {"block_indexes": indexes},
     )
-  block = context.state.restored.blocks[indexes[0]]
+  block = context.current_blocks()[indexes[0]]
   matches = [r for r in block.document_records if r.document_hash == document_hash]
   if len(matches) != 1:  # stale index or a hash repeated inside one block
     raise ApiError(

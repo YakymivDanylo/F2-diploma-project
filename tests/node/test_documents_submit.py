@@ -27,7 +27,7 @@ H2 = sha256_hex(b"submit-2")
 
 
 def _serve(env: dict[str, str], **kwargs: Any) -> Iterator[tuple[TestClient, NodeContext]]:
-  app = create_app(load_config(env), **kwargs)
+  app = create_app(load_config(env), mine=False, **kwargs)
   with TestClient(app) as client:
     yield client, app.state.context
 
@@ -157,7 +157,7 @@ def test_node_signs_only_as_its_own_institution(node_env: NodeEnv) -> None:  # C
 
 
 def test_not_ready_node_asks_to_retry(node_env: NodeEnv) -> None:  # CN-TC-4.7
-  app = create_app(load_config(_pow(node_env)))
+  app = create_app(load_config(_pow(node_env)), mine=False)
   with TestClient(app) as client:
     app.state.accepting = False
     response = _post(client)

@@ -24,7 +24,7 @@ H3 = sha256_hex(b"hard-3")
 
 
 def _serve(env: dict[str, str], **kwargs: Any) -> Iterator[tuple[TestClient, NodeContext]]:
-  app = create_app(load_config(env), **kwargs)
+  app = create_app(load_config(env), mine=False, **kwargs)
   with TestClient(app) as client:
     yield client, app.state.context
 
