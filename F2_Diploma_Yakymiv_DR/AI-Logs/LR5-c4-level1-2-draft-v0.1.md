@@ -1,43 +1,46 @@
 ## C4 Level 1 — System Context (чернетка v0.1)
 
+> Зміст чернетки збережено без змін (вузли, зв'язки, підписи); для коректного відображення в Obsidian синтаксис `C4*` замінено на `flowchart`.
+
 ```mermaid
-C4Context
-    title System Context — Document Verification Blockchain
-    Person(issuer, "Емітент", "Заклад освіти")
-    Person(verifier, "Верифікатор", "Роботодавець")
-    Person(operator, "Оператор вузла", "Адміністратор")
-    System(sys, "Блокчейн-система верифікації", "P2P-мережа вузлів")
-    System_Ext(prom, "Prometheus/Grafana", "Метрики")
-    Rel(issuer, sys, "Видає документи")
-    Rel(verifier, sys, "Перевіряє документи")
-    Rel(operator, sys, "Керує")
-    Rel(prom, sys, "Збирає метрики")
+flowchart LR
+    issuer(["<b>Емітент</b><br/>Person<br/>Заклад освіти"])
+    verifier(["<b>Верифікатор</b><br/>Person<br/>Роботодавець"])
+    operator(["<b>Оператор вузла</b><br/>Person<br/>Адміністратор"])
+    sys["<b>Блокчейн-система верифікації</b><br/>System<br/>P2P-мережа вузлів"]
+    prom["<b>Prometheus/Grafana</b><br/>System_Ext<br/>Метрики"]
+    issuer -->|"Видає документи"| sys
+    verifier -->|"Перевіряє документи"| sys
+    operator -->|"Керує"| sys
+    prom -->|"Збирає метрики"| sys
 ```
 
 ## C4 Level 2 — Container (чернетка v0.1)
 
+> Зміст чернетки збережено без змін (вузли, зв'язки, підписи); для коректного відображення в Obsidian синтаксис `C4*` замінено на `flowchart`.
+
 ```mermaid
-C4Container
-    title Container Diagram
-    Person(issuer, "Емітент")
-    Person(verifier, "Верифікатор")
-    System_Boundary(b, "Система") {
-        Container(spa, "SPA", "React", "Видача, верифікація")
-        Container(node1, "Вузол 1", "FastAPI", "Валідатор")
-        Container(node2, "Вузол 2", "FastAPI", "Валідатор")
-        Container(node3, "Вузол 3", "FastAPI", "Валідатор")
-        Container(node4, "Вузол 4", "FastAPI", "Валідатор")
-        ContainerDb(store, "Chain Store", "JSON", "Ланцюг")
-        Container(attacker, "Attacker", "Python", "Симуляція атак")
-    }
-    System_Ext(prom, "Prometheus", "Метрики")
-    Rel(issuer, spa, "Використовує")
-    Rel(verifier, spa, "Використовує")
-    Rel(spa, node1, "Надсилає дані")
-    Rel(node1, node2, "Спілкується")
-    Rel(node1, node3, "Спілкується")
-    Rel(node1, node4, "Спілкується")
-    Rel(node1, store, "Зберігає")
-    Rel(prom, node1, "Збирає метрики")
-    Rel(attacker, node1, "Атакує")
+flowchart TB
+    issuer(["<b>Емітент</b><br/>Person"])
+    verifier(["<b>Верифікатор</b><br/>Person"])
+    subgraph b["Система"]
+        direction TB
+        spa["<b>SPA</b><br/>React<br/>Видача, верифікація"]
+        node1["<b>Вузол 1</b><br/>FastAPI<br/>Валідатор"]
+        node2["<b>Вузол 2</b><br/>FastAPI<br/>Валідатор"]
+        node3["<b>Вузол 3</b><br/>FastAPI<br/>Валідатор"]
+        node4["<b>Вузол 4</b><br/>FastAPI<br/>Валідатор"]
+        store[("<b>Chain Store</b><br/>JSON<br/>Ланцюг")]
+        attacker["<b>Attacker</b><br/>Python<br/>Симуляція атак"]
+    end
+    prom["<b>Prometheus</b><br/>System_Ext<br/>Метрики"]
+    issuer -->|"Використовує"| spa
+    verifier -->|"Використовує"| spa
+    spa -->|"Надсилає дані"| node1
+    node1 -->|"Спілкується"| node2
+    node1 -->|"Спілкується"| node3
+    node1 -->|"Спілкується"| node4
+    node1 -->|"Зберігає"| store
+    prom -->|"Збирає метрики"| node1
+    attacker -->|"Атакує"| node1
 ```
