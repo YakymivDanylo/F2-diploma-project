@@ -43,6 +43,7 @@ __all__ = [
   "ValidatorSet",
   "pow_target",
   "validate_chain",
+  "validate_candidate",
   "validate_extension",
 ]
 
@@ -301,8 +302,10 @@ def _validate_block(
   resolve_issuer_key: KeyResolver,
   expected_difficulty: int | None,
   validator_set: ValidatorSet | None,
+  check_quorum: bool = True,
 ) -> tuple[FailureType | None, str]:
-  """The per-block checklist; returns (failure_type or None, this block's recomputed hash)."""
+  """The per-block checklist; returns (failure_type or None, this block's recomputed hash).
+  `check_quorum=False` is only for a PBFT candidate, whose commit votes do not exist yet."""
   if not _well_formed(block):
     return "structural", ""
   recomputed = _recompute_hash(block)
@@ -320,7 +323,11 @@ def _validate_block(
     return "signature", recomputed
   if not _structure_ok(block, previous):
     return "structural", recomputed
-  if block.algorithm == "pbft" and not _quorum_ok(block, validator_set, resolve_node_key):
+  if (
+    check_quorum
+    and block.algorithm == "pbft"
+    and not _quorum_ok(block, validator_set, resolve_node_key)
+  ):
     return "quorum", recomputed
   return None, recomputed
 
@@ -437,3 +444,37 @@ def validate_extension(
     expected_difficulty=expected_difficulty,
     validator_set=validator_set,
   )
+
+
+def validate_candidate(
+  trusted_tip: Block,
+  block: Block,
+  *,
+  resolve_node_key: KeyResolver,
+  resolve_issuer_key: KeyResolver,
+  validator_set: ValidatorSet,
+) -> ValidationResult:
+  """Validate a PBFT candidate (pre-prepare) on top of an already-validated `trusted_tip`.
+
+  The identical per-block checklist as `validate_extension`, with only the commit-quorum
+  step skipped - the votes cannot exist before the round runs. Instead, the candidate must
+  carry no `commit_signatures` and be proposed by a ValidatorSet member (`"quorum"` if not).
+  """
+  _check_parameters(None, validator_set)
+  if block.algorithm != "pbft" or block.commit_signatures:
+    return _fail(trusted_tip.index + 1, "structural")
+  failure, _ = _validate_block(
+    block,
+    trusted_tip,
+    trusted_tip.block_hash,
+    resolve_node_key=resolve_node_key,
+    resolve_issuer_key=resolve_issuer_key,
+    expected_difficulty=None,
+    validator_set=validator_set,
+    check_quorum=False,
+  )
+  if failure is not None:
+    return _fail(trusted_tip.index + 1, failure)
+  if block.proposer_id not in validator_set.members:
+    return _fail(trusted_tip.index + 1, "quorum")
+  return _VALID

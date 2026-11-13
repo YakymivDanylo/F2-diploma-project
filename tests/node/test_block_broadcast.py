@@ -22,6 +22,7 @@ from blockchain_core import (
 )
 from blockchain_core.storage.chain_store import block_to_dict
 from node.config import load_config
+from node.consensus.pbft.engine import PbftEngine
 from node.main import create_app
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "node"
@@ -347,7 +348,7 @@ def test_pbft_node_screens_but_does_not_adopt(node_env: NodeEnv) -> None:
   async def go():
     async with Cluster(node_env, ids=("node1", "node2"), mode="pbft") as cluster:
       n2 = cluster["node2"]
-      assert n2.engine is None  # PBFT adoption arrives with Slice 17
+      assert isinstance(n2.engine, PbftEngine)  # Slice 17: the PBFT engine adopts
       verdict = await n2.receiver.handle_block(
         "node1", block_to_dict(pow_block(node_env, _genesis(n2), 1))
       )
@@ -361,7 +362,7 @@ def test_pbft_node_screens_but_does_not_adopt(node_env: NodeEnv) -> None:
 
 def test_exactly_one_validation_entry_point() -> None:
   # CN-TC-8.1 / FR-25: only validation_gateway.py may reach the core validators.
-  pattern = re.compile(r"\b(validate_chain|validate_extension)\b")
+  pattern = re.compile(r"\b(validate_chain|validate_extension|validate_candidate)\b")
   users = sorted(
     path.name for path in SRC.rglob("*.py") if pattern.search(path.read_text(encoding="utf-8"))
   )

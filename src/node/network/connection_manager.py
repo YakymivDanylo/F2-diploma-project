@@ -460,10 +460,18 @@ class PeerConnectionManager:
 
   # ---------------------------------------------------------------- sending
 
-  async def broadcast(self, message: dict[str, Any]) -> dict[str, bool]:
-    """Fan out to every connected peer over its established direction. Returns who got it."""
+  async def broadcast(
+    self, message: dict[str, Any], *, only: Iterable[str] | None = None
+  ) -> dict[str, bool]:
+    """Fan out to every connected peer over its established direction (restricted to `only`,
+    e.g. the ValidatorSet for PBFT votes). Returns who got it."""
     text = encode_message(message)
-    targets = {pid: link for pid, link in self._links.items() if link.connected}
+    allowed = None if only is None else set(only)
+    targets = {
+      pid: link
+      for pid, link in self._links.items()
+      if link.connected and (allowed is None or pid in allowed)
+    }
     results = await asyncio.gather(*(self._send(pid, link, text) for pid, link in targets.items()))
     return dict(zip(targets, results, strict=True))
 

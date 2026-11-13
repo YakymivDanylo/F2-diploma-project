@@ -83,6 +83,7 @@ from .validation import (
   ValidationResult,
   ValidatorSet,
   pow_target,
+  validate_candidate,
   validate_chain,
   validate_extension,
 )
@@ -161,6 +162,7 @@ __all__ = [
   "sign_canonical",
   "sign_commit",
   "validate_chain",
+  "validate_candidate",
   "validate_extension",
   "verify_bytes",
   "verify_canonical",

@@ -232,10 +232,10 @@ def test_mined_proof_verifies(node_env: NodeEnv) -> None:
     assert verify_proof(DocumentRecord(**body["record"]), proof, body["merkle_root"])
 
 
-def test_no_engine_under_pbft(node_env: NodeEnv) -> None:
+def test_no_pow_engine_under_pbft(node_env: NodeEnv) -> None:
   app = create_app(load_config(_env(node_env, mode="pbft")))
   with TestClient(app) as client:
-    assert app.state.engine is None
+    assert not isinstance(app.state.engine, PowEngine)  # the PBFT engine runs instead
     assert client.get("/node/info").json()["algorithm"] == "pbft"
 
 

@@ -322,18 +322,15 @@ def test_nothing_starts_or_serves_before_the_startup_sync_returns(
       return outcome
 
     sync.startup = startup
-    engine = app.state.engine
-    if mode == "pow":
-      assert engine is not None
-      real_start = engine.start
+    engine = app.state.engine  # the PoW miner, or the PBFT engine (Slice 17)
+    assert engine is not None
+    real_start = engine.start
 
-      async def start() -> None:
-        events.append(f"engine.start accepting={app.state.accepting}")
-        await real_start()
+    async def start() -> None:
+      events.append(f"engine.start accepting={app.state.accepting}")
+      await real_start()
 
-      engine.start = start
-    else:
-      assert engine is None  # no PoW miner exists under PBFT
+    engine.start = start
 
     async with app.router.lifespan_context(app):
       async with _client(app) as client:
@@ -344,10 +341,11 @@ def test_nothing_starts_or_serves_before_the_startup_sync_returns(
 
         release.set()  # 2. sync completes ...
         await until(lambda: app.state.accepting, timeout=5.0)  # 3. ... then serve
-        expected = ["sync:begin tip=1 accepting=False", "sync:end tip=3 accepting=False"]
-        if mode == "pow":
-          expected.append("engine.start accepting=False")
-        assert events == expected
+        assert events == [
+          "sync:begin tip=1 accepting=False",
+          "sync:end tip=3 accepting=False",
+          "engine.start accepting=False",
+        ]
         assert state.blocks == tuple(chain)
 
   run(go())

@@ -24,6 +24,7 @@ from blockchain_core import (
   ValidationResult,
   ValidatorSet,
   sha256_of_canonical,
+  validate_candidate,
   validate_chain,
   validate_extension,
   verify_canonical,
@@ -80,6 +81,23 @@ class ChainValidator:
       return result
     duplicate = first_duplicate_document(blocks)
     return result if duplicate is None else _duplicate(duplicate)
+
+  @property
+  def validator_set(self) -> ValidatorSet | None:
+    return self._validator_set
+
+  def candidate(self, trusted_tip: Block, block: Block) -> ValidationResult:
+    """A PBFT candidate: the extension checklist minus the not-yet-possible commit quorum."""
+    if self._validator_set is None:
+      return ValidationResult(valid=False, first_invalid_index=block.index, failure_type="quorum")
+    resolver = self._resolvers.current
+    return validate_candidate(
+      trusted_tip,
+      block,
+      resolve_node_key=resolver.resolve_node_key,
+      resolve_issuer_key=resolver.resolve_issuer_key,
+      validator_set=self._validator_set,
+    )
 
   def extension(self, trusted_tip: Block, new_blocks: Sequence[Block]) -> ValidationResult:
     resolver = self._resolvers.current
@@ -138,6 +156,45 @@ class ValidationGateway:
       except ApiError:
         return block.index
     return None
+
+  def screen_candidate(
+    self,
+    block: Block,
+    *,
+    primary_id: str,
+    view: int,
+    known: Callable[[str], bool],
+  ) -> InboundVerdict:
+    """Judge a PBFT pre-prepare candidate before voting `prepare` on it (UC-6 step 2).
+
+    The candidate gets the SAME per-block checklist as a finalized block, from our tip, via the
+    core's `validate_candidate`: only the commit quorum is skipped (the votes do not exist
+    yet). The timestamp must be within the skew window on BOTH sides: a primary must not
+    back-date a block to a time when a since-retired key still resolved. `known` is the
+    cross-block document-uniqueness rule."""
+    if block.algorithm != "pbft" or block.proposer_id != primary_id:
+      return _reject("not_primary")
+    if dict(block.sealed_consensus) != {"view_number": view} or block.commit_signatures:
+      return _reject("structural")
+    if not isinstance(block.proposer_signature, str) or not block.proposer_signature:
+      return _reject("unsigned")
+    blocks = self._chain_view()
+    tip = blocks[-1]
+    if block.index != tip.index + 1 or block.previous_hash != tip.block_hash:
+      return _reject("link")
+    now = self._now_ms()
+    try:
+      reject_future_timestamp(block.timestamp, now_ms=now, max_skew_ms=self._max_skew)
+    except ApiError:
+      return _reject("timestamp_in_future")
+    if block.timestamp < now - self._max_skew:
+      return _reject("timestamp_too_old")
+    result = self.validator.candidate(tip, block)
+    if not result.valid:
+      return _reject(result.failure_type or "invalid")
+    if first_duplicate_document([block], known) is not None:
+      return _reject("duplicate_document")
+    return InboundVerdict("accept")
 
   def screen(self, block: Block) -> InboundVerdict:
     """Judge a block received from any peer. Pure: it never mutates anything."""

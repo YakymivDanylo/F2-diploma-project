@@ -39,6 +39,7 @@ from node.body_limit import BodyLimitMiddleware
 from node.chain_state import ChainState
 from node.config import NodeConfig, load_config
 from node.consensus.base import ConsensusEngine
+from node.consensus.pbft.engine import PbftEngine
 from node.consensus.pow import PowEngine
 from node.errors import install_error_handlers
 from node.forwarding import (
@@ -59,6 +60,7 @@ from node.network.ws_blocks import (
   broadcast_block,
 )
 from node.network.ws_blocks import router as ws_blocks_router
+from node.network.ws_pbft import PbftReceiver, is_pbft_message
 from node.peers.registry import PeerRegistry
 from node.peers.seed_registration import PeerTransport, UrllibTransport, register_with_seeds
 from node.registries import (
@@ -251,21 +253,38 @@ def create_app(
     peer_addresses=lambda: [(p.node_id, p.host, p.port) for p in context.peers.list()],
     known_ids=lambda: context.resolvers.current.active_node_ids,
     connector=connector or WebsocketsConnector(),
-    on_message=lambda peer_id, message: receiver.on_message(peer_id, message),
+    on_message=lambda peer_id, message: dispatch(peer_id, message),
     sleep=sleep,
     **(network_options or {}),
   )
   announcements: set[asyncio.Task[None]] = set()
   engine: ConsensusEngine | None = None
+  pbft_engine: PbftEngine | None = None
+
+  def is_validator(node_id: str) -> bool:
+    return node_id in context.resolvers.current.active_node_ids
+
+  async def announce(block: Block) -> None:
+    # fire and forget: one slow peer must not delay the next block
+    task = asyncio.create_task(broadcast_block(manager, block))
+    announcements.add(task)
+    task.add_done_callback(announcements.discard)
+
   if mine and config.consensus_mode == "pow":  # also on an invalid chain: sync may heal it
-
-    async def announce(block: Block) -> None:
-      # fire and forget: one slow peer must not delay the next block
-      task = asyncio.create_task(broadcast_block(manager, block))
-      announcements.add(task)
-      task.add_done_callback(announcements.discard)
-
     engine = PowEngine(context, on_block_mined=announce)
+  elif mine:  # pbft: votes go to ValidatorSet members only, never to PeerInfo peers
+
+    async def send_votes(message: dict[str, Any]) -> None:
+      await manager.broadcast(message, only=context.resolvers.current.active_node_ids)
+
+    pbft_engine = PbftEngine(
+      context,
+      send=send_votes,
+      on_finalized=announce,  # finalized blocks also reach non-validators and lagging nodes
+      flag=manager.flag,
+      on_needs_sync=lambda peer_id: sync.request(peer_id),
+    )
+    engine = pbft_engine
   sync = ChainSync(
     state=context.chain_state,
     validator=context.validator,
@@ -277,10 +296,17 @@ def create_app(
     page_size=config.max_page_size,
     expected_difficulty=config.expected_difficulty,
     # startup is confirmed only by a ValidatorSet member, never by an arbitrary PeerInfo entry
-    is_validator=lambda node_id: node_id in context.resolvers.current.active_node_ids,
+    is_validator=is_validator,
     sleep=sleep,
   )
   receiver = BlockReceiver(context.gateway, engine, manager, on_needs_sync=sync.request)
+  pbft_receiver = PbftReceiver(pbft_engine, is_validator=is_validator, flag=manager.flag)
+
+  async def dispatch(peer_id: str, message: dict[str, Any]) -> None:
+    if is_pbft_message(message):
+      await pbft_receiver.on_message(peer_id, message)
+    else:
+      await receiver.on_message(peer_id, message)
 
   @asynccontextmanager
   async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -355,6 +381,7 @@ def create_app(
   app.state.engine = engine
   app.state.manager = manager
   app.state.receiver = receiver
+  app.state.pbft_receiver = pbft_receiver
   app.state.sync = sync
   app.state.accepting = False  # the lifespan flips it once the startup sync is done
   install_error_handlers(app)
