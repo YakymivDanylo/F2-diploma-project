@@ -4,6 +4,10 @@ All notable changes to this project, newest first. Entries are grouped by UTC da
 
 ## 2026-11-13
 
+### Add PBFT voting between validators — 17:18 UTC
+**Summary:** In PBFT mode the four institutions now vote on every new block, and a block is accepted only when at least three of them agree.
+**Details:** The leading node proposes a block, the other validators check it and vote in two rounds, and the block is added once enough matching votes are collected. Only the official validators can vote, however many other nodes join. Duplicate or out-of-order messages never count twice, and no node signs two different blocks for the same slot. If one validator is offline, blocks are still finalized.
+
 ### Protect validator addresses with signed registration — 15:28 UTC
 **Summary:** Nobody can redirect another validator's network address anymore; only the validator itself can announce where it lives.
 **Details:** Registering a validator node now requires a fresh registration signed with that validator's own key. Attempts to move a validator to a foreign address, replay an old registration or use a wrong key are rejected, and unsigned validator entries passed along by other nodes are ignored. Ordinary non-validator peers are unchanged and still carry no voting weight.
