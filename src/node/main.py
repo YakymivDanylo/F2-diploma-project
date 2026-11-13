@@ -34,6 +34,7 @@ from node.api.node_info import router as node_info_router
 from node.api.peers import PeerOut
 from node.api.peers import router as peers_router
 from node.body_limit import BodyLimitMiddleware
+from node.chain_state import ChainState
 from node.config import NodeConfig, load_config
 from node.consensus.base import ConsensusEngine
 from node.consensus.pow import PowEngine
@@ -94,11 +95,11 @@ class NodeContext:
   inflight: set[str]  # hashes being forwarded by this (non-primary) node
   metrics: MetricsRecorder
   gateway: ValidationGateway
+  chain_state: ChainState  # the only owner of the live chain (UC-17)
 
   def current_blocks(self) -> tuple[Block, ...]:
-    """The live chain (grows as blocks are appended); the stored copy if it is unextendable."""
-    chain = self.state.restored.chain
-    return chain.blocks if chain is not None else self.state.restored.blocks
+    """A consistent view of the live chain (the stored copy while it is invalid)."""
+    return self.chain_state.blocks
 
 
 def _same_key(a: PublicKey, b: PublicKey) -> bool:
@@ -167,15 +168,25 @@ def build_node_context(
     validator_set=core_validator_set,
   )
   validity_cache = ValidityCache(validator)
-
-  def chain_view() -> tuple[Block, ...]:
-    chain = state.restored.chain
-    return chain.blocks if chain is not None else state.restored.blocks
-
-  gateway = ValidationGateway(
-    validator, resolvers, chain_view, max_future_skew_ms=config.max_future_skew_ms
-  )
   validity_cache.initialize(state.restored.blocks, state.restored.validation)
+  documents = DocumentIndex(state.restored.blocks)
+  mempool = Mempool()
+  chain_state = ChainState(
+    state.restored.blocks,
+    valid=state.restored.valid,
+    store=store,
+    validator=validator,
+    validity_cache=validity_cache,
+    documents=documents,
+    mempool=mempool,
+    requeue_dropped=is_pow,
+  )
+  gateway = ValidationGateway(
+    validator,
+    resolvers,
+    lambda: chain_state.blocks,
+    max_future_skew_ms=config.max_future_skew_ms,
+  )
   return NodeContext(
     config=config,
     validators=validators,
@@ -186,8 +197,8 @@ def build_node_context(
     validator=validator,
     validity_cache=validity_cache,
     peers=PeerRegistry(config.node_id),
-    mempool=Mempool(),
-    documents=DocumentIndex(state.restored.blocks),
+    mempool=mempool,
+    documents=documents,
     forwarding=ForwardService(
       forwarder or UnavailableForwarder(), PendingForwards(), config.forward_ack_timeout_ms
     ),
@@ -196,6 +207,7 @@ def build_node_context(
     inflight=set(),
     metrics=MetricsRecorder(),
     gateway=gateway,
+    chain_state=chain_state,
   )
 
 
@@ -236,7 +248,7 @@ def create_app(
   )
   announcements: set[asyncio.Task[None]] = set()
   engine: ConsensusEngine | None = None
-  if mine and config.consensus_mode == "pow" and context.state.restored.chain is not None:
+  if mine and config.consensus_mode == "pow" and context.chain_state.extendable:
 
     async def announce(block: Block) -> None:
       # fire and forget: one slow peer must not delay the next block

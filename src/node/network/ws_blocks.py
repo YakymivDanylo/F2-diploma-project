@@ -120,10 +120,11 @@ class BlockReceiver:
     if message.get("type") != "block":
       self._manager.flag(peer_id, "unknown_message_type")
       return
-    self.handle_block(peer_id, message.get("block"))
+    await self.handle_block(peer_id, message.get("block"))
 
-  def handle_block(self, peer_id: str, payload: object) -> InboundVerdict:
-    """Decode -> screen -> adopt, with no await in between (nothing can interleave)."""
+  async def handle_block(self, peer_id: str, payload: object) -> InboundVerdict:
+    """Decode -> screen -> adopt. Adoption goes through `ChainState`, which re-checks the tip
+    under its lock, so a block screened against a tip that moved meanwhile is not appended."""
     try:
       block = block_from_dict(payload)
     except Exception:
@@ -142,7 +143,7 @@ class BlockReceiver:
     if verdict.kind == "reject":
       self._manager.flag(peer_id, f"rejected block: {verdict.reason}")
       return verdict
-    if self._engine is None or not self._engine.on_inbound_block(block):
+    if self._engine is None or not await self._engine.on_inbound_block(block):
       logger.info("block %d from %s was valid but not adopted", block.index, peer_id)
       return InboundVerdict("reject", "not_adopted")
     return verdict

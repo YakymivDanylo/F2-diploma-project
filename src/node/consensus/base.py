@@ -11,7 +11,7 @@ class ConsensusEngine(Protocol):
   def on_submission(self, record: DocumentRecord) -> None:
     """A record entered this node's mempool; wake the engine. Must not block."""
 
-  def on_inbound_block(self, block: Block) -> bool:
+  async def on_inbound_block(self, block: Block) -> bool:
     """Offer a block received from a peer. True when it was adopted as the new tip."""
 
   async def start(self) -> None: ...

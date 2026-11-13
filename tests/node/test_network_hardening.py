@@ -129,10 +129,10 @@ def test_sync_hints_are_deduplicated_and_bounded(node_env: NodeEnv) -> None:
       genesis = n2.context.current_blocks()[0]
       ahead = pow_block(node_env, pow_block(node_env, genesis, 1), 2)
       for _ in range(500):  # a replayed, genuinely signed, future block
-        n2.receiver.handle_block("node1", block_to_dict(ahead))
+        await n2.receiver.handle_block("node1", block_to_dict(ahead))
       assert n2.receiver.needs_sync == ["node1"]
       for i in range(200):
-        n2.receiver.handle_block(f"peer{i}", block_to_dict(ahead))
+        await n2.receiver.handle_block(f"peer{i}", block_to_dict(ahead))
       assert len(n2.receiver.needs_sync) <= MAX_SYNC_HINTS
 
   run(go())

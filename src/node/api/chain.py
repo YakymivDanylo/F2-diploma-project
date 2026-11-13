@@ -28,7 +28,7 @@ async def get_chain(
   to: Annotated[int | None, Query(ge=0)] = None,
 ) -> ChainPage:
   context = request.app.state.context
-  blocks = context.current_blocks()
+  blocks = context.chain_state.blocks  # one consistent view for the whole page
   tip = len(blocks) - 1
   cap = context.config.max_page_size
   if to is not None and to < from_:

@@ -40,8 +40,15 @@ class Mempool:
 class DocumentIndex:
   def __init__(self, blocks: Sequence[Block] = ()) -> None:
     self._where: dict[str, list[int]] = {}
+    self.reset(blocks)
+
+  def reset(self, blocks: Sequence[Block]) -> None:
+    """Rebuild the index for a whole (replaced) chain."""
+    where: dict[str, list[int]] = {}
     for position, block in enumerate(blocks):
-      self.add_block(block, position)
+      for document_hash in {record.document_hash for record in block.document_records}:
+        where.setdefault(document_hash, []).append(position)
+    self._where = where
 
   def add_block(self, block: Block, position: int) -> None:
     """`position` is the block's place in the chain list (not its self-declared index)."""

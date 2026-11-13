@@ -145,7 +145,7 @@ def test_competing_block_aborts_mining_and_requeues(node_env: NodeEnv, caplog) -
 
     peer = pow_block(node_env, context.current_blocks()[-1], seed=2, difficulty=1)
     with caplog.at_level(logging.INFO, logger="node.pow"):
-      assert engine.on_inbound_block(peer) is True
+      assert await engine.on_inbound_block(peer) is True
       await _until(lambda: "abandoned" in caplog.text, timeout=2.0)  # within one poll
     assert context.documents.contains(_hash(2))
     assert context.mempool.contains(mine_hash)  # our batch was not included: re-queued
@@ -166,7 +166,7 @@ def test_competing_block_with_our_record_dequeues_it(node_env: NodeEnv) -> None:
     _pend(context, engine, 1)
     await asyncio.sleep(0.05)
     peer = pow_block(node_env, context.current_blocks()[-1], seed=1, difficulty=1)
-    assert engine.on_inbound_block(peer) is True
+    assert await engine.on_inbound_block(peer) is True
     assert len(context.mempool) == 0  # included in the winning block: nothing to re-queue
     assert context.documents.contains(_hash(1))
 
@@ -178,13 +178,13 @@ def test_inbound_block_must_extend_the_tip_and_validate(node_env: NodeEnv) -> No
     genesis = context.current_blocks()[0]
     good = pow_block(node_env, genesis, seed=5, difficulty=1)
     unsigned = Block(**{**good.__dict__, "proposer_signature": None})
-    assert engine.on_inbound_block(unsigned) is False  # fails validation
+    assert await engine.on_inbound_block(unsigned) is False  # fails validation
     wrong_diff = pow_block(node_env, genesis, seed=6, difficulty=2)
-    assert engine.on_inbound_block(wrong_diff) is False
-    assert engine.on_inbound_block(good) is True
-    assert engine.on_inbound_block(good) is False  # already the tip: not a new extension
+    assert await engine.on_inbound_block(wrong_diff) is False
+    assert await engine.on_inbound_block(good) is True
+    assert await engine.on_inbound_block(good) is False  # already the tip: not a new extension
     stale = pow_block(node_env, genesis, seed=7, difficulty=1)
-    assert engine.on_inbound_block(stale) is False  # a fork at the same height
+    assert await engine.on_inbound_block(stale) is False  # a fork at the same height
     assert len(context.current_blocks()) == 2
 
   _run(node_env, scenario)
@@ -196,7 +196,7 @@ def test_finalized_records_are_dropped_from_the_batch(node_env: NodeEnv) -> None
     _pend(context, engine, 1)
     await asyncio.sleep(0.05)
     peer = pow_block(node_env, context.current_blocks()[-1], seed=1, difficulty=1)
-    engine.on_inbound_block(peer)
+    await engine.on_inbound_block(peer)
     context.mempool.add(_record(node_env, 1))  # the same hash sneaks back in
     engine._target = pow_target(1)
     engine.on_submission(_record(node_env, 1))

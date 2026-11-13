@@ -56,25 +56,39 @@ class ValidityCache:
     self._tip = blocks[-1]
     self._snapshot = _snapshot(outcome, len(blocks) - 1)
 
-  def on_replace(self, blocks: Sequence[Block]) -> None:
-    self._tip = blocks[-1]
-    self._snapshot = _snapshot(self._validator.full(blocks), len(blocks) - 1)
+  # Each event is split into a fallible `plan_*` (computes the next snapshot, changes nothing)
+  # and an infallible `install`, so `ChainState` can do all fallible work before it persists.
 
-  def on_append(self, block: Block) -> None:
-    """Validate only the new block against the trusted tip - O(1), no full revalidation."""
+  def plan_replace(self, blocks: Sequence[Block], result: ValidationResult) -> CacheSnapshot:
+    return _snapshot(result, len(blocks) - 1)
+
+  def plan_append(self, block: Block, result: ValidationResult | None = None) -> CacheSnapshot:
     current = self.snapshot
     tip = self._tip
     if tip is None:
       raise RuntimeError("validity cache is not initialized")
     tip_index = current.tip_index + 1
     if current.chain_valid:
-      self._snapshot = _snapshot(self._validator.extension(tip, [block]), tip_index)
-    else:  # an invalid chain stays invalid; only the tip moves
-      self._snapshot = CacheSnapshot(
-        chain_valid=False,
-        first_invalid_index=current.first_invalid_index,
-        failure_type=current.failure_type,
-        tip_index=tip_index,
-        quorum_status=current.quorum_status,
-      )
-    self._tip = block
+      outcome = result if result is not None else self._validator.extension(tip, [block])
+      return _snapshot(outcome, tip_index)
+    # an invalid chain stays invalid; only the tip moves
+    return CacheSnapshot(
+      chain_valid=False,
+      first_invalid_index=current.first_invalid_index,
+      failure_type=current.failure_type,
+      tip_index=tip_index,
+      quorum_status=current.quorum_status,
+    )
+
+  def install(self, tip: Block, snapshot: CacheSnapshot) -> None:
+    self._tip = tip
+    self._snapshot = snapshot
+
+  def on_replace(self, blocks: Sequence[Block], result: ValidationResult) -> None:
+    """A replaced chain, with the full-validation `result` it was accepted on (no re-run)."""
+    self.install(blocks[-1], self.plan_replace(blocks, result))
+
+  def on_append(self, block: Block, result: ValidationResult | None = None) -> None:
+    """Validate only the new block against the trusted tip - O(1), no full revalidation.
+    `result` is that extension check when the caller (`ChainState`) already ran it."""
+    self.install(block, self.plan_append(block, result))

@@ -111,7 +111,7 @@ async def submit_document(body: SubmitRequest, request: Request) -> SubmitAck:
   # always released before awaiting the primary, so a slow forward never blocks others.
   async with context.submission_lock:
     if (
-      context.documents.contains(document_hash)
+      context.chain_state.has_document(document_hash)
       or context.mempool.contains(document_hash)
       or document_hash in context.inflight
     ):
@@ -165,7 +165,9 @@ async def get_document(
   document_hash: Annotated[str, Path(pattern=HASH_PATTERN)],  # validated before any search
 ) -> DocumentLookup:
   context = request.app.state.context
-  indexes = context.documents.block_indexes(document_hash)
+  chain_state = context.chain_state
+  blocks = chain_state.blocks  # positions and blocks come from the same chain (no await between)
+  indexes = chain_state.document_positions(document_hash)
   if not indexes:
     raise ApiError(404, "not_found", "no document with this hash has been issued")
   if len(indexes) > 1:  # never silently resolved to the earliest match
@@ -175,7 +177,7 @@ async def get_document(
       "the hash appears in more than one block",
       {"block_indexes": indexes},
     )
-  block = context.current_blocks()[indexes[0]]
+  block = blocks[indexes[0]]
   matches = [r for r in block.document_records if r.document_hash == document_hash]
   if len(matches) != 1:  # stale index or a hash repeated inside one block
     raise ApiError(

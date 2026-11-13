@@ -2,9 +2,10 @@
 
 The loop varies `sealed_consensus.nonce` inside the hashed preimage in fixed-size chunks and
 yields to the event loop between chunks. At each yield it checks whether the chain tip moved
-(a competing block was adopted); if so the attempt is abandoned and the batch, which stays in
-the mempool until some block includes it, is mined again on the new tip. Broadcast of a mined
-block is a hook (`on_block_mined`) wired by the WebSocket layer in Slice 15.
+(a competing block was appended, or sync replaced the chain); if so the attempt is abandoned and
+the batch, which stays in the mempool until some block includes it, is mined again on the new
+tip. Every chain change goes through `ChainState` (the single owner and lock). Broadcast of a
+mined block is a hook (`on_block_mined`) wired by the WebSocket layer in Slice 15.
 """
 
 from __future__ import annotations
@@ -54,12 +55,12 @@ class PowEngine:
     on_block_mined: Callable[[Block], Awaitable[None]] | None = None,
   ) -> None:
     difficulty = context.config.expected_difficulty
-    if difficulty is None or context.state.restored.chain is None:
+    if difficulty is None or not context.chain_state.extendable:
       raise ValueError("PoW needs EXPECTED_DIFFICULTY and an extendable (valid) chain")
     if attempts_per_poll < 1 or max_batch < 1:
       raise ValueError("attempts_per_poll and max_batch must be >= 1")
     self._context = context
-    self._chain = context.state.restored.chain
+    self._chain_state = context.chain_state
     self._difficulty = difficulty
     self._target = pow_target(difficulty)
     self._attempts_per_poll = attempts_per_poll
@@ -75,9 +76,9 @@ class PowEngine:
   def on_submission(self, record: DocumentRecord) -> None:
     self._wake.set()
 
-  def on_inbound_block(self, block: Block) -> bool:
+  async def on_inbound_block(self, block: Block) -> bool:
     """Adopt a peer's block if it extends our tip; a running attempt notices at its next poll."""
-    adopted = self._adopt(block)
+    adopted = await self._adopt(block)
     if adopted:
       self._wake.set()  # leftover pending records are mined on top of the new tip
     return adopted
@@ -115,7 +116,7 @@ class PowEngine:
     stale = [
       r.document_hash
       for r in context.mempool.snapshot()
-      if context.documents.contains(r.document_hash)
+      if self._chain_state.has_document(r.document_hash)
     ]
     if stale:  # finalized elsewhere meanwhile
       context.mempool.remove(stale)
@@ -123,7 +124,7 @@ class PowEngine:
 
   async def _mine(self, batch: list[DocumentRecord]) -> None:
     context = self._context
-    tip = self._chain.tip
+    tip = self._chain_state.tip
     started_wall, started = self._now_ms(), self._monotonic()
     resolver = context.resolvers.current
     try:
@@ -159,13 +160,18 @@ class PowEngine:
           return
         nonce += 1
       await asyncio.sleep(0)  # the abort point: let inbound blocks and requests run
-      if self._chain.tip.block_hash != tip.block_hash:
+      if self._chain_state.tip.block_hash != tip.block_hash:
         logger.info("mining at height %d abandoned: a competing block was adopted", candidate.index)
         return
 
   async def _publish(self, block: Block, attempts: int, started_wall: int, started: float) -> None:
-    if not self._adopt(block):
-      await asyncio.sleep(PERSIST_RETRY_SECONDS)  # e.g. a persistence error; do not spin
+    try:
+      adopted = await self._chain_state.append(block)
+    except Exception:
+      logger.exception("could not persist/append mined block %d", block.index)
+      await asyncio.sleep(PERSIST_RETRY_SECONDS)  # a persistence error; do not spin
+      return
+    if not adopted:  # lost the race: the tip moved while we waited; mine again on it
       return
     elapsed = max(self._monotonic() - started, 1e-3)
     self._context.metrics.record(
@@ -183,22 +189,10 @@ class PowEngine:
 
   # ----------------------------------------------------------------- chain update
 
-  def _adopt(self, block: Block) -> bool:
-    """Validate against the tip, persist, append, index and de-queue - with no await inside."""
-    context = self._context
-    tip = self._chain.tip
-    if block.index != tip.index + 1 or block.previous_hash != tip.block_hash:
-      return False
-    if not context.validator.extension(tip, [block]).valid:
-      logger.warning("rejected a block at height %d: failed validation", block.index)
-      return False
+  async def _adopt(self, block: Block) -> bool:
+    """`ChainState` validates against the tip, persists, appends, indexes and de-queues."""
     try:
-      context.store.save([*self._chain.blocks, block])
-      self._chain.append(block)
+      return await self._chain_state.append(block)
     except Exception:
       logger.exception("could not persist/append block %d", block.index)
       return False
-    context.validity_cache.on_append(block)
-    context.documents.add_block(block, block.index)  # index first, then de-queue (no gap)
-    context.mempool.remove([record.document_hash for record in block.document_records])
-    return True

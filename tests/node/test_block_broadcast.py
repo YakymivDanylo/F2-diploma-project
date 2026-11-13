@@ -106,7 +106,7 @@ def test_a_peer_that_missed_a_block_is_told_to_sync(node_env: NodeEnv) -> None: 
       n1, n2 = cluster["node1"], cluster["node2"]
       first = pow_block(node_env, _genesis(n1), 1)
       second = pow_block(node_env, first, 2)
-      verdict = n2.receiver.handle_block("node1", block_to_dict(second))  # skipping #1
+      verdict = await n2.receiver.handle_block("node1", block_to_dict(second))  # skipping #1
       assert verdict.kind == "needs_sync"
       assert n2.tip == 0 and n2.receiver.needs_sync == ["node1"]  # logged, nothing appended
 
@@ -123,7 +123,7 @@ def _reject_case(node_env: NodeEnv, build, expected: str, *, flagged: bool = Tru
       target, sender = cluster["node2"], cluster["node1"]
       relays = _spy_broadcasts(target)
       block = build(cluster)
-      verdict = target.receiver.handle_block("node1", block_to_dict(block))
+      verdict = await target.receiver.handle_block("node1", block_to_dict(block))
       assert verdict.kind == "reject" and verdict.reason == expected
       assert target.tip == 0  # never appended
       assert relays == []  # never re-broadcast
@@ -225,8 +225,8 @@ def test_duplicate_delivery_is_a_no_op(node_env: NodeEnv) -> None:  # CN-TC-7.5
       n2 = cluster["node2"]
       block = pow_block(node_env, _genesis(n2), 1)
       payload = block_to_dict(block)
-      assert n2.receiver.handle_block("node1", payload).kind == "accept"
-      again = n2.receiver.handle_block("node1", payload)  # e.g. via the other connection
+      assert (await n2.receiver.handle_block("node1", payload)).kind == "accept"
+      again = await n2.receiver.handle_block("node1", payload)  # e.g. via the other connection
       assert again.kind == "duplicate"
       assert n2.tip == 1 and n2.manager.flags == {}  # no error, no flag
       assert len(cluster.stored_blocks("node2")) == 2
@@ -262,10 +262,10 @@ def test_same_proposer_signing_twice_is_an_equivocation(node_env: NodeEnv, caplo
     async with Cluster(node_env, ids=("node1", "node2")) as cluster:
       n2 = cluster["node2"]
       first = pow_block(node_env, _genesis(n2), 1)
-      assert n2.receiver.handle_block("node1", block_to_dict(first)).kind == "accept"
+      assert (await n2.receiver.handle_block("node1", block_to_dict(first))).kind == "accept"
       second = pow_block(node_env, _genesis(n2), 2)  # node1 again, a different block, same height
       with caplog.at_level(logging.WARNING, logger="node.validation"):
-        verdict = n2.receiver.handle_block("node1", block_to_dict(second))
+        verdict = await n2.receiver.handle_block("node1", block_to_dict(second))
       assert (verdict.kind, verdict.reason, verdict.equivocation) == ("reject", "conflict", True)
       assert "equivocation" in caplog.text
       assert n2.context.current_blocks()[1].block_hash == first.block_hash  # first one stays
@@ -278,12 +278,12 @@ def test_two_miners_at_one_height_is_a_fork_not_equivocation(node_env: NodeEnv, 
     async with Cluster(node_env, ids=("node1", "node2", "node3")) as cluster:
       n2 = cluster["node2"]
       first = pow_block(node_env, _genesis(n2), 1)
-      assert n2.receiver.handle_block("node1", block_to_dict(first)).accepted
+      assert (await n2.receiver.handle_block("node1", block_to_dict(first))).accepted
       rival = pow_block(
         node_env, _genesis(n2), 2, proposer="node3", signer=node_env.validator_keys["node3"]
       )
       with caplog.at_level(logging.WARNING, logger="node.validation"):
-        verdict = n2.receiver.handle_block("node3", block_to_dict(rival))
+        verdict = await n2.receiver.handle_block("node3", block_to_dict(rival))
       assert (verdict.reason, verdict.equivocation) == ("conflict", False)
       assert "equivocation" not in caplog.text
 
@@ -297,11 +297,11 @@ def test_doctored_hash_is_neither_a_duplicate_nor_an_equivocation(
     async with Cluster(node_env, ids=("node1", "node2")) as cluster:
       n2 = cluster["node2"]
       first = pow_block(node_env, _genesis(n2), 1)
-      assert n2.receiver.handle_block("node1", block_to_dict(first)).accepted
+      assert (await n2.receiver.handle_block("node1", block_to_dict(first))).accepted
       other = pow_block(node_env, _genesis(n2), 2)  # genuinely different block, same proposer
       disguised = replace(other, block_hash=first.block_hash)  # claims to be the stored one
       with caplog.at_level(logging.WARNING, logger="node.validation"):
-        verdict = n2.receiver.handle_block("node1", block_to_dict(disguised))
+        verdict = await n2.receiver.handle_block("node1", block_to_dict(disguised))
       assert verdict.kind == "reject" and verdict.reason == "hash"
       assert not verdict.equivocation and "equivocation" not in caplog.text
 
@@ -312,13 +312,13 @@ def test_a_forged_conflict_is_not_an_equivocation(node_env: NodeEnv, caplog) -> 
   async def go():
     async with Cluster(node_env, ids=("node1", "node2")) as cluster:
       n2 = cluster["node2"]
-      assert n2.receiver.handle_block(
-        "node1", block_to_dict(pow_block(node_env, _genesis(n2), 1))
+      assert (
+        await n2.receiver.handle_block("node1", block_to_dict(pow_block(node_env, _genesis(n2), 1)))
       ).accepted
       stranger = generate_node_keypair()
       forged = pow_block(node_env, _genesis(n2), 2, proposer="node3", signer=stranger)
       with caplog.at_level(logging.WARNING, logger="node.validation"):
-        verdict = n2.receiver.handle_block("node1", block_to_dict(forged))
+        verdict = await n2.receiver.handle_block("node1", block_to_dict(forged))
       assert verdict.reason == "bad_signature" and not verdict.equivocation
       assert "equivocation" not in caplog.text  # nobody can frame node3 with a bad signature
 
@@ -332,10 +332,12 @@ def test_stale_replay_is_not_reprocessed(node_env: NodeEnv) -> None:  # CN-TC-8.
       chain = [_genesis(n2)]
       for seed in (1, 2, 3):
         chain.append(pow_block(node_env, chain[-1], seed))
-        assert n2.receiver.handle_block("node1", block_to_dict(chain[-1])).accepted
+        assert (await n2.receiver.handle_block("node1", block_to_dict(chain[-1]))).accepted
       old_other = pow_block(node_env, chain[0], 7)  # a different block for finalized index 1
-      assert n2.receiver.handle_block("node1", block_to_dict(old_other)).reason == "conflict"
-      assert n2.receiver.handle_block("node1", block_to_dict(chain[1])).kind == "duplicate"
+      assert (
+        await n2.receiver.handle_block("node1", block_to_dict(old_other))
+      ).reason == "conflict"
+      assert (await n2.receiver.handle_block("node1", block_to_dict(chain[1]))).kind == "duplicate"
       assert n2.tip == 3
 
   run(go())
@@ -346,7 +348,7 @@ def test_pbft_node_screens_but_does_not_adopt(node_env: NodeEnv) -> None:
     async with Cluster(node_env, ids=("node1", "node2"), mode="pbft") as cluster:
       n2 = cluster["node2"]
       assert n2.engine is None  # PBFT adoption arrives with Slice 17
-      verdict = n2.receiver.handle_block(
+      verdict = await n2.receiver.handle_block(
         "node1", block_to_dict(pow_block(node_env, _genesis(n2), 1))
       )
       assert verdict.kind == "reject" and n2.tip == 0  # a PoW block never fits a PBFT chain
