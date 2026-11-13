@@ -37,6 +37,8 @@ class NodeConfig:
   mempool_max_size: int
   forward_ack_timeout_ms: int  # wait for the primary's reply to a forwarded record
   init_chain: bool  # explicit initialization: only then may a missing chain become genesis
+  startup_sync_timeout_s: float  # bound on the load -> sync -> serve wait (UC-3-EC4)
+  sync_interval_s: float  # periodic chain sync with peers once serving
 
 
 def _get(env: Mapping[str, str], key: str, default: str | None = None) -> str:
@@ -77,6 +79,17 @@ def _strict_int(
   if raw.strip() == "":
     raise ConfigError(f"{key} must not be empty")
   return _int(env, key, None, minimum=minimum, maximum=maximum)
+
+
+def _float(env: Mapping[str, str], key: str, default: float, *, minimum: float) -> float:
+  raw = _get(env, key, str(default))
+  try:
+    value = float(raw)
+  except ValueError:
+    raise ConfigError(f"{key} must be a number, got {raw!r}") from None
+  if not value >= minimum or value == float("inf"):  # also rejects nan
+    raise ConfigError(f"{key} must be a finite number >= {minimum}, got {raw!r}")
+  return value
 
 
 def _csv(env: Mapping[str, str], key: str, default: str) -> tuple[str, ...]:
@@ -135,4 +148,6 @@ def load_config(env: Mapping[str, str] | None = None) -> NodeConfig:
       source, "FORWARD_ACK_TIMEOUT_MS", 2000, minimum=1, maximum=60_000
     ),
     init_chain=_flag(source, "INIT_CHAIN"),
+    startup_sync_timeout_s=_float(source, "STARTUP_SYNC_TIMEOUT_S", 10.0, minimum=0.0),
+    sync_interval_s=_float(source, "SYNC_INTERVAL_S", 5.0, minimum=0.05),
   )

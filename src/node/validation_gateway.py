@@ -17,7 +17,7 @@ import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal, cast
 
 from blockchain_core import (
   Block,
@@ -35,6 +35,26 @@ from node.key_resolver import ResolverHolder
 logger = logging.getLogger("node.validation")
 
 
+def first_duplicate_document(
+  blocks: Sequence[Block], known: Callable[[str], bool] = lambda _hash: False
+) -> int | None:
+  """Index of the first block re-issuing a document hash already finalized (in `known` or in
+  an earlier block of `blocks`) - the cross-block uniqueness rule the core leaves to the node."""
+  seen: set[str] = set()
+  for block in blocks:
+    hashes = {record.document_hash for record in block.document_records}
+    if hashes & seen or any(known(h) for h in hashes):
+      return block.index
+    seen |= hashes
+  return None
+
+
+def _duplicate(index: int) -> ValidationResult:
+  return ValidationResult(
+    valid=False, first_invalid_index=index, failure_type=cast(Any, "duplicate_document")
+  )
+
+
 class ChainValidator:
   def __init__(
     self,
@@ -49,13 +69,17 @@ class ChainValidator:
 
   def full(self, blocks: Sequence[Block]) -> ValidationResult:
     resolver = self._resolvers.current  # one snapshot per validation
-    return validate_chain(
+    result = validate_chain(
       blocks,
       resolve_node_key=resolver.resolve_node_key,
       resolve_issuer_key=resolver.resolve_issuer_key,
       expected_difficulty=self._expected_difficulty,
       validator_set=self._validator_set,
     )
+    if not result.valid:
+      return result
+    duplicate = first_duplicate_document(blocks)
+    return result if duplicate is None else _duplicate(duplicate)
 
   def extension(self, trusted_tip: Block, new_blocks: Sequence[Block]) -> ValidationResult:
     resolver = self._resolvers.current
@@ -103,6 +127,17 @@ class ValidationGateway:
     self._chain_view = chain_view
     self._max_skew = max_future_skew_ms
     self._now_ms = now_ms
+
+  def first_future_block(self, blocks: Sequence[Block]) -> int | None:
+    """Index of the first block stamped beyond the future-skew cap (sync applies the same cap
+    as the broadcast path), or None."""
+    now = self._now_ms()
+    for block in blocks:
+      try:
+        reject_future_timestamp(block.timestamp, now_ms=now, max_skew_ms=self._max_skew)
+      except ApiError:
+        return block.index
+    return None
 
   def screen(self, block: Block) -> InboundVerdict:
     """Judge a block received from any peer. Pure: it never mutates anything."""

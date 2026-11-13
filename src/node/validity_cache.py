@@ -9,13 +9,17 @@ binding lives in `node.validation_gateway`, the single FR-25 validation entry po
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from blockchain_core import Block, ValidationResult
 from node.validation_gateway import ChainValidator
 
 QUORUM_HEALTHY = "healthy"
 QUORUM_INVALID = "quorum_invalid"  # the chain failed the commit-quorum check
+# Two differently-finalized PBFT blocks at one height were observed (UC-3-EC1). Sticky: a safety
+# violation stays visible until an operator restarts the node. Slice 18 adds
+# `view_change_in_progress` and `crash_fault_quorum_loss`.
+QUORUM_BYZANTINE = "byzantine_event_detected"
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,7 @@ class ValidityCache:
     self._validator = validator
     self._tip: Block | None = None
     self._snapshot: CacheSnapshot | None = None
+    self._byzantine = False
 
   @property
   def snapshot(self) -> CacheSnapshot:
@@ -82,7 +87,15 @@ class ValidityCache:
 
   def install(self, tip: Block, snapshot: CacheSnapshot) -> None:
     self._tip = tip
-    self._snapshot = snapshot
+    self._snapshot = self._sticky(snapshot)
+
+  def flag_byzantine_event(self) -> None:
+    """Surface a safety violation via `quorum_status`; only `ChainState` calls this."""
+    self._byzantine = True
+    self._snapshot = self._sticky(self.snapshot)
+
+  def _sticky(self, snapshot: CacheSnapshot) -> CacheSnapshot:
+    return replace(snapshot, quorum_status=QUORUM_BYZANTINE) if self._byzantine else snapshot
 
   def on_replace(self, blocks: Sequence[Block], result: ValidationResult) -> None:
     """A replaced chain, with the full-validation `result` it was accepted on (no re-run)."""

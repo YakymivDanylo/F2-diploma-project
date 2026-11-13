@@ -1,9 +1,10 @@
 """App factory and boot sequence.
 
 Boot order: load registries (fail fast) -> open chain store -> reload keys + validated
-chain (missing chain fails closed unless INIT_CHAIN) -> cross-check key stores against the
-registries -> serve. Exactly one of expected_difficulty (pow) / ValidatorSet (pbft) is
-passed to the core, per CONSENSUS_MODE.
+chain (missing chain fails closed unless INIT_CHAIN; INIT_CHAIN is ignored when a chain is
+persisted) -> cross-check key stores against the registries -> bounded startup sync with peers
+(`STARTUP_SYNC_TIMEOUT_S`) -> serve (API writes, mining). Exactly one of expected_difficulty
+(pow) / ValidatorSet (pbft) is passed to the core, per CONSENSUS_MODE.
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ from node.registries import (
   load_issuer_registry,
   load_validator_registry,
 )
+from node.sync import ChainFetcher, ChainSync, HttpChainFetcher, PeerAddress
 from node.validation_gateway import ChainValidator, ValidationGateway
 from node.validity_cache import ValidityCache
 
@@ -159,7 +161,12 @@ def build_node_context(
     store.close()
     raise
   if not state.restored.valid:
-    logger.error("persisted chain is INVALID: %s", state.restored.validation)
+    logger.error(
+      "persisted chain is INVALID: first_invalid_index=%s failure_type=%s; startup sync will "
+      "try to replace it with a valid peer chain",
+      state.restored.validation.first_invalid_index,
+      state.restored.validation.failure_type,
+    )
   logger.info("node %s started in %s mode", config.node_id, config.consensus_mode)
   logger.info("effective FORWARD_ACK_TIMEOUT_MS=%d", config.forward_ack_timeout_ms)
   validator = ChainValidator(
@@ -221,6 +228,7 @@ def create_app(
   mine: bool = True,
   connector: Connector | None = None,
   network_options: dict[str, Any] | None = None,
+  chain_fetcher: ChainFetcher | None = None,
 ) -> FastAPI:
   context = build_node_context(
     config, forwarder=forwarder, primary_status=primary_status
@@ -248,7 +256,7 @@ def create_app(
   )
   announcements: set[asyncio.Task[None]] = set()
   engine: ConsensusEngine | None = None
-  if mine and config.consensus_mode == "pow" and context.chain_state.extendable:
+  if mine and config.consensus_mode == "pow":  # also on an invalid chain: sync may heal it
 
     async def announce(block: Block) -> None:
       # fire and forget: one slow peer must not delay the next block
@@ -257,14 +265,41 @@ def create_app(
       task.add_done_callback(announcements.discard)
 
     engine = PowEngine(context, on_block_mined=announce)
-  receiver = BlockReceiver(context.gateway, engine, manager)
+  sync = ChainSync(
+    state=context.chain_state,
+    validator=context.validator,
+    gateway=context.gateway,
+    mode=config.consensus_mode,
+    peers=lambda: [PeerAddress(p.node_id, p.host, p.port) for p in context.peers.list()],
+    fetcher=chain_fetcher or HttpChainFetcher(),
+    flag=manager.flag,
+    page_size=config.max_page_size,
+    expected_difficulty=config.expected_difficulty,
+    # startup is confirmed only by a ValidatorSet member, never by an arbitrary PeerInfo entry
+    is_validator=lambda node_id: node_id in context.resolvers.current.active_node_ids,
+    sleep=sleep,
+  )
+  receiver = BlockReceiver(context.gateway, engine, manager, on_needs_sync=sync.request)
 
   @asynccontextmanager
   async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     task: asyncio.Task[None] | None = None
+    background: set[asyncio.Task[None]] = set()
+    app.state.accepting = False  # nothing is served before the startup sync (UC-3-F)
+
+    async def go_live() -> None:
+      """load (done) -> bounded startup sync -> serve; then keep syncing in the background."""
+      if config.seed_peers or len(context.peers):
+        logger.info("startup sync (up to %ss)", config.startup_sync_timeout_s)
+        await sync.startup(config.startup_sync_timeout_s)
+      if engine is not None:
+        await engine.start()
+      app.state.accepting = True
+      logger.info("node %s is serving", config.node_id)
+      periodic = asyncio.create_task(sync.run(config.sync_interval_s), name="chain-sync")
+      background.add(periodic)
+
     await manager.start()
-    if engine is not None:
-      await engine.start()
     if config.seed_peers:
       payload = {
         "node_id": config.node_id,
@@ -282,14 +317,21 @@ def create_app(
           sleep=sleep,
         )
       )
+    if config.seed_peers or len(context.peers):
+      background.add(asyncio.create_task(go_live(), name="startup-sync"))  # serve 503 meanwhile
+    else:
+      await go_live()  # no peer to wait for
     try:
       yield
     finally:
       app.state.accepting = False
+      for job in list(background):  # sync stops before the store closes
+        job.cancel()
+      await asyncio.gather(*background, return_exceptions=True)
       if engine is not None:
         await engine.stop()
-      for task in list(announcements):
-        task.cancel()
+      for announcement in list(announcements):
+        announcement.cancel()
       await manager.stop()
       if task is not None:
         task.cancel()
@@ -301,7 +343,8 @@ def create_app(
   app.state.engine = engine
   app.state.manager = manager
   app.state.receiver = receiver
-  app.state.accepting = True  # Slice 16b holds this False until startup sync completes
+  app.state.sync = sync
+  app.state.accepting = False  # the lifespan flips it once the startup sync is done
   install_error_handlers(app)
   app.include_router(node_info_router)
   app.include_router(peers_router)

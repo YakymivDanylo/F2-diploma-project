@@ -101,11 +101,29 @@ class ChainState:
     working on a chain that is no longer current."""
     return self._generation
 
+  @property
+  def trusted_blocks(self) -> tuple[Block, ...]:
+    """The part of the chain that passed validation: everything while it is valid, else the
+    prefix before `first_invalid_index`. Sync judges a candidate against this, so a tampered
+    local chain is healed only by a chain that beats its valid prefix - never rolled back to
+    a shorter one (UC-3-G)."""
+    blocks = self._blocks
+    if self._extendable:
+      return blocks
+    first_invalid = self._cache.snapshot.first_invalid_index
+    return blocks if first_invalid is None else blocks[: max(0, first_invalid)]
+
   def has_document(self, document_hash: str) -> bool:
     return self._documents.contains(document_hash)
 
   def document_positions(self, document_hash: str) -> list[int]:
     return self._documents.block_indexes(document_hash)
+
+  def report_byzantine_event(self, reason: str) -> None:
+    """A safety violation (e.g. two differently-finalized PBFT blocks at one height): never
+    resolved by a tie-break, only logged and surfaced as `quorum_status`."""
+    logger.error("SAFETY VIOLATION (Byzantine event): %s", reason)
+    self._cache.flag_byzantine_event()
 
   def add_replace_listener(self, listener: ReplaceListener) -> None:
     """`listener(new_blocks)` runs inside the critical section after a successful replace, once
@@ -129,6 +147,9 @@ class ChainState:
         return False
       if block.index != tip.index + 1 or block.previous_hash != tip.block_hash:
         return False  # not our next block (e.g. a replace moved the tip meanwhile)
+      if any(self._documents.contains(r.document_hash) for r in block.document_records):
+        logger.warning("rejected a block at height %d: re-issues a finalized hash", block.index)
+        return False  # cross-block document_hash uniqueness (node-layer policy)
       result = self._validator.extension(tip, [block])
       if not result.valid:
         logger.warning("rejected a block at height %d: failed validation", block.index)
@@ -182,8 +203,8 @@ class ChainState:
         )
         return False
       snapshot = self._cache.plan_replace(candidate, result)  # fallible work before the commit
+      old = self.trusted_blocks  # only records of validated blocks may be re-queued
       self._store.save(candidate)  # the commit point; only infallible steps follow
-      old = self._blocks
       self._blocks = candidate
       self._extendable = True
       self._generation += 1

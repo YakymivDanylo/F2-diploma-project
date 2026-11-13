@@ -55,8 +55,8 @@ class PowEngine:
     on_block_mined: Callable[[Block], Awaitable[None]] | None = None,
   ) -> None:
     difficulty = context.config.expected_difficulty
-    if difficulty is None or not context.chain_state.extendable:
-      raise ValueError("PoW needs EXPECTED_DIFFICULTY and an extendable (valid) chain")
+    if difficulty is None:
+      raise ValueError("PoW needs EXPECTED_DIFFICULTY")
     if attempts_per_poll < 1 or max_batch < 1:
       raise ValueError("attempts_per_poll and max_batch must be >= 1")
     self._context = context
@@ -70,6 +70,10 @@ class PowEngine:
     self._on_block_mined = on_block_mined
     self._wake = asyncio.Event()
     self._task: asyncio.Task[None] | None = None
+    # A sync replace (UC-3-EC2): a running attempt notices the moved tip at its next poll and
+    # is abandoned; the wake restarts mining on the adopted chain (re-queued records included),
+    # and lets a node whose invalid local chain was healed by sync start mining at all.
+    self._chain_state.add_replace_listener(lambda _blocks: self._wake.set())
 
   # ------------------------------------------------------------- engine interface
 
@@ -100,8 +104,8 @@ class PowEngine:
 
   async def _run(self) -> None:
     while True:
-      batch = self._next_batch()
-      if not batch:
+      batch = self._next_batch() if self._chain_state.extendable else []
+      if not batch:  # nothing to mine, or an invalid local chain that sync has not healed yet
         self._wake.clear()
         await self._wake.wait()
         continue

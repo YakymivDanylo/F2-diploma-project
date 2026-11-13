@@ -34,7 +34,9 @@ def _record(env: NodeEnv, seed: int):
   )
 
 
-def _candidate(env: NodeEnv, previous: Block, seed: int, algorithm, sealed, proposer="node1"):
+def _candidate(
+  env: NodeEnv, previous: Block, seed: int, algorithm, sealed, proposer="node1", timestamp=None
+):
   def resolve_issuer(issuer_id: str, at_timestamp: int):
     return env.issuer_key.public_key if issuer_id == "issuer1" else None
 
@@ -42,7 +44,7 @@ def _candidate(env: NodeEnv, previous: Block, seed: int, algorithm, sealed, prop
     [_record(env, seed)],
     previous_hash=previous.block_hash,
     index=previous.index + 1,
-    timestamp=BASE_TS + (previous.index + 1) * STEP,
+    timestamp=BASE_TS + (previous.index + 1) * STEP if timestamp is None else timestamp,
     proposer_id=proposer,
     algorithm=algorithm,
     sealed_consensus=sealed,
@@ -51,9 +53,18 @@ def _candidate(env: NodeEnv, previous: Block, seed: int, algorithm, sealed, prop
 
 
 def pow_block(
-  env: NodeEnv, previous: Block, seed: int, *, difficulty: int = 1, proposer="node1", signer=None
+  env: NodeEnv,
+  previous: Block,
+  seed: int,
+  *,
+  difficulty: int = 1,
+  proposer="node1",
+  signer=None,
+  timestamp: int | None = None,
 ):
-  block = _candidate(env, previous, seed, "pow", {"nonce": 0, "difficulty": difficulty}, proposer)
+  block = _candidate(
+    env, previous, seed, "pow", {"nonce": 0, "difficulty": difficulty}, proposer, timestamp
+  )
   target = pow_target(difficulty)
   nonce = 0
   while int(block.block_hash, 16) >= target:

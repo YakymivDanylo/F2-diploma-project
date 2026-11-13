@@ -15,6 +15,7 @@ from node_helpers import NodeEnv, pem_of
 
 from blockchain_core import Block, save_key_pair
 from blockchain_core.storage.chain_store import decode_chain
+from node.api.chain import chain_page
 from node.config import load_config
 from node.main import NodeContext, create_app
 from node.network.connection_manager import ConnectionClosed, PeerConnectionManager
@@ -107,6 +108,27 @@ class _NodeConnector:
     return await self._network._connect(self._dialer, host, port)
 
 
+class LoopbackChainFetcher:
+  """A `ChainFetcher` that answers `GET /chain` pages from the target node's `ChainState`
+  in-process (the same `chain_page` the endpoint uses), honouring `LoopbackNetwork.down`."""
+
+  def __init__(self, network: LoopbackNetwork, contexts: dict[tuple[str, int], NodeContext]):
+    self._network, self._contexts = network, contexts
+    self.requests: list[tuple[tuple[str, int], int, int]] = []
+
+  async def get_chain_page(self, host: str, port: int, from_index: int, to_index: int):
+    address = (host, port)
+    self.requests.append((address, from_index, to_index))
+    await asyncio.sleep(0)
+    if address in self._network.down or address not in self._contexts:
+      raise ConnectionRefusedError(f"{host}:{port}")
+    context = self._contexts[address]
+    page = chain_page(
+      context.chain_state.blocks, from_index, to_index, context.config.max_page_size
+    )
+    return page.model_dump()
+
+
 async def fast_sleep(seconds: float) -> None:
   await asyncio.sleep(min(seconds, 0.005))
 
@@ -169,6 +191,8 @@ class Cluster:
       **(options or {}),
     }
     self.network = LoopbackNetwork()
+    self.contexts: dict[tuple[str, int], NodeContext] = {}
+    self.chain_fetcher = LoopbackChainFetcher(self.network, self.contexts)
     self.dir = node_env.root / f"cluster-{next(_CLUSTER_IDS)}"
     (self.dir / "keys").mkdir(parents=True)
     self.nodes: dict[str, ClusterNode] = {}
@@ -196,10 +220,12 @@ class Cluster:
         connector=self.network.connector_for(address),
         sleep=fast_sleep,
         network_options=self.options,
+        chain_fetcher=self.chain_fetcher,
       )
       await self._stack.enter_async_context(app.router.lifespan_context(app))
       node = ClusterNode(node_id, address, app.state.context, app)
       self.network.managers[address] = node.manager
+      self.contexts[address] = node.context
       self.nodes[node_id] = node
     if self.register_peers:
       for node in self.nodes.values():

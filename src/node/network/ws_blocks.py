@@ -4,12 +4,13 @@ Receiving a block never trusts the sender: it is decoded, then screened by the s
 validation gateway, and only then handed to the consensus engine. A rejected block is never
 appended and never forwarded. Accepted blocks are not relayed either - the manager keeps a
 link to every known peer (full mesh), and a peer that missed a block catches up by chain
-sync (Slice 16b).
+sync (`node.sync`), which a `needs_sync` verdict triggers on demand.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -110,11 +111,14 @@ class BlockReceiver:
     gateway: ValidationGateway,
     engine: ConsensusEngine | None,
     manager: PeerConnectionManager,
+    *,
+    on_needs_sync: Callable[[str], None] | None = None,
   ) -> None:
     self._gateway = gateway
     self._engine = engine
     self._manager = manager
-    self.needs_sync: list[str] = []  # peers that showed a longer chain; Slice 16b consumes this
+    self._on_needs_sync = on_needs_sync
+    self.needs_sync: list[str] = []  # peers that showed a longer chain (bounded audit trail)
 
   async def on_message(self, peer_id: str, message: dict[str, Any]) -> None:
     if message.get("type") != "block":
@@ -139,6 +143,8 @@ class BlockReceiver:
       )
       if peer_id not in self.needs_sync and len(self.needs_sync) < MAX_SYNC_HINTS:
         self.needs_sync.append(peer_id)
+      if self._on_needs_sync is not None:
+        self._on_needs_sync(peer_id)  # on-demand chain sync (UC-3 trigger)
       return verdict
     if verdict.kind == "reject":
       self._manager.flag(peer_id, f"rejected block: {verdict.reason}")

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 
+from blockchain_core import Block
 from blockchain_core.storage.chain_store import block_to_dict
 from node.errors import ApiError
 
@@ -21,16 +23,9 @@ class ChainPage(BaseModel):
   blocks: list[dict[str, Any]]
 
 
-@router.get("/chain", response_model=ChainPage)
-async def get_chain(
-  request: Request,
-  from_: Annotated[int, Query(alias="from", ge=0)] = 0,
-  to: Annotated[int | None, Query(ge=0)] = None,
-) -> ChainPage:
-  context = request.app.state.context
-  blocks = context.chain_state.blocks  # one consistent view for the whole page
+def chain_page(blocks: Sequence[Block], from_: int, to: int | None, cap: int) -> ChainPage:
+  """One bounded, inclusive page of `blocks` (shared by the endpoint and sync tests)."""
   tip = len(blocks) - 1
-  cap = context.config.max_page_size
   if to is not None and to < from_:
     raise ApiError(422, "invalid_range", "'to' must be >= 'from'", {"from": from_, "to": to})
   page_end = from_ + cap - 1
@@ -46,3 +41,14 @@ async def get_chain(
     truncated=truncated,
     blocks=[block_to_dict(b) for b in blocks[from_ : end + 1]],
   )
+
+
+@router.get("/chain", response_model=ChainPage)
+async def get_chain(
+  request: Request,
+  from_: Annotated[int, Query(alias="from", ge=0)] = 0,
+  to: Annotated[int | None, Query(ge=0)] = None,
+) -> ChainPage:
+  context = request.app.state.context
+  blocks = context.chain_state.blocks  # one consistent view for the whole page
+  return chain_page(blocks, from_, to, context.config.max_page_size)
