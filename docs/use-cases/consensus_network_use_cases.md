@@ -226,6 +226,8 @@ This document covers the multi-node network layer built on top of Epic 2's core 
 
 **Postconditions**: The block is finalized identically and deterministically on every correct (non-faulty) `ValidatorSet` member.
 
+**As built (Slice 17):** `WS /ws/pbft` is not a separate socket: PBFT messages are multiplexed over the authenticated peer link of UC-6-F/UC-7 and distinguished by message type. UC-6-E3 is enforced as "a commit never counts toward finalization before this node has its own prepare quorum": earlier commits are held (needed for reordered delivery, UC-6-EC3) but not counted.
+
 ### Alternative Flows
 - **UC-6-A: Replica (non-primary) role** — a node only responds to `pre-prepare`/other nodes' `prepare`/`commit` messages; it does not initiate.
 - **UC-6-B: Successful round with f=1 tolerated fault among n=4** — see UC-6-EC1.
