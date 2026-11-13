@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import pytest
@@ -20,6 +21,7 @@ from node.network.connection_manager import (
   PeerConnectionManager,
 )
 from node.network.ws_blocks import MAX_SYNC_HINTS
+from node.peers.attestation import sign_registration
 from node.peers.registry import PeerRegistry, PeerRegistryFullError
 
 
@@ -49,7 +51,24 @@ def test_a_validator_id_cannot_be_registered_with_a_foreign_key(node_env: NodeEn
     assert response.json()["error"]["code"] == "peer_key_mismatch"
     assert client.get("/peers").json()["peers"] == []  # nothing was stored
     genuine = pem_of(node_env.validator_keys["node2"])
-    assert _register(client, "node2", genuine).status_code == 200  # the real node still can
+    issued_at = int(time.time() * 1000)
+    signature = sign_registration(
+      node_env.validator_keys["node2"].private_key,
+      "node2",
+      "somewhere.example",
+      9100,
+      genuine,
+      issued_at,
+    )
+    signed = {
+      "node_id": "node2",
+      "host": "somewhere.example",
+      "port": 9100,
+      "public_key": genuine,
+      "issued_at": issued_at,
+      "signature": signature,
+    }
+    assert client.post("/peers/register", json=signed).status_code == 200  # the real node can
     assert [p["node_id"] for p in client.get("/peers").json()["peers"]] == ["node2"]
 
 

@@ -25,6 +25,8 @@ class PeerInfo:
   port: int
   public_key: str  # PEM of the peer's NodeKeyPair public key
   last_seen: int  # epoch ms
+  issued_at: int | None = None  # signed registration (required for ValidatorSet identities)
+  signature: str | None = None
 
 
 class PeerRegistry:
@@ -33,8 +35,18 @@ class PeerRegistry:
     self._max_peers = max_peers
     self._peers: dict[str, PeerInfo] = {}
 
-  def register(self, node_id: str, host: str, port: int, public_key: str) -> PeerInfo | None:
-    """Add or refresh a peer. Self is ignored (None). A different key for a known id raises."""
+  def register(
+    self,
+    node_id: str,
+    host: str,
+    port: int,
+    public_key: str,
+    *,
+    issued_at: int | None = None,
+    signature: str | None = None,
+  ) -> PeerInfo | None:
+    """Add or refresh a peer. Self is ignored (None). A different key for a known id raises.
+    The caller (the API / gossip merge) has already checked a validator's signed registration."""
     if node_id == self._self_id:
       return None
     now = int(time.time() * 1000)
@@ -42,13 +54,18 @@ class PeerRegistry:
     if existing is None:
       if len(self._peers) >= self._max_peers:
         raise PeerRegistryFullError(node_id)
-      info = PeerInfo(node_id, host, port, public_key, now)
+      info = PeerInfo(node_id, host, port, public_key, now, issued_at, signature)
     elif existing.public_key != public_key:
       raise PeerKeyMismatchError(node_id)
     else:
-      info = replace(existing, host=host, port=port, last_seen=now)
+      info = replace(
+        existing, host=host, port=port, last_seen=now, issued_at=issued_at, signature=signature
+      )
     self._peers[node_id] = info
     return info
+
+  def get(self, node_id: str) -> PeerInfo | None:
+    return self._peers.get(node_id)
 
   def list(self) -> list[PeerInfo]:
     return list(self._peers.values())

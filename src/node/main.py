@@ -32,7 +32,8 @@ from node.api.chain import router as chain_router
 from node.api.documents import router as documents_router
 from node.api.metrics import router as metrics_router
 from node.api.node_info import router as node_info_router
-from node.api.peers import PeerOut
+from node.api.peers import PeerOut, own_entry, validator_registration_error
+from node.api.peers import now_ms as wall_ms
 from node.api.peers import router as peers_router
 from node.body_limit import BodyLimitMiddleware
 from node.chain_state import ChainState
@@ -301,12 +302,22 @@ def create_app(
 
     await manager.start()
     if config.seed_peers:
-      payload = {
-        "node_id": config.node_id,
-        "host": config.node_host,
-        "port": config.node_port,
-        "public_key": public_key_to_pem(context.state.node_key.public_key).decode("ascii"),
-      }
+      payload = own_entry(context, wall_ms()).model_dump(exclude={"last_seen"})
+
+      def accept(entry: PeerOut) -> bool:
+        return (
+          validator_registration_error(
+            context,
+            node_id=entry.node_id,
+            host=entry.host,
+            port=entry.port,
+            public_key=entry.public_key,
+            issued_at=entry.issued_at,
+            signature=entry.signature,
+          )
+          is None
+        )
+
       task = asyncio.create_task(
         register_with_seeds(
           config.seed_peers,
@@ -315,6 +326,7 @@ def create_app(
           peer_transport or UrllibTransport(),
           PeerOut,
           sleep=sleep,
+          accept=accept,
         )
       )
     if config.seed_peers or len(context.peers):

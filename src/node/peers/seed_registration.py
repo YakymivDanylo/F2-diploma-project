@@ -44,16 +44,33 @@ class UrllibTransport:
     return await asyncio.to_thread(_call)
 
 
-def merge_peer_list(registry: PeerRegistry, body: dict[str, Any], model: type[BaseModel]) -> int:
-  """Merge a received peer list; invalid or conflicting entries are skipped."""
+def merge_peer_list(
+  registry: PeerRegistry,
+  body: dict[str, Any],
+  model: type[BaseModel],
+  accept: Callable[[Any], bool] = lambda _entry: True,
+) -> int:
+  """Merge a received peer list; invalid, conflicting or unaccepted entries are skipped.
+  `accept` rejects e.g. a ValidatorSet identity without a valid signed registration."""
   merged = 0
   peers = body.get("peers")
   if not isinstance(peers, list):
     return 0
   for item in peers:
     try:
-      entry = model.model_validate(item)
-      if registry.register(entry.node_id, entry.host, entry.port, entry.public_key):  # type: ignore[attr-defined]
+      entry: Any = model.model_validate(item)
+      if not accept(entry):
+        logger.warning("skipping an unauthenticated validator entry from gossip")
+        continue
+      info = registry.register(
+        entry.node_id,
+        entry.host,
+        entry.port,
+        entry.public_key,
+        issued_at=getattr(entry, "issued_at", None),
+        signature=getattr(entry, "signature", None),
+      )
+      if info:
         merged += 1
     except (ValidationError, PeerKeyMismatchError):
       logger.warning("skipping invalid peer entry from gossip")
@@ -70,6 +87,7 @@ async def register_with_seeds(
   sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
   initial_delay: float = 1.0,
   max_delay: float = 30.0,
+  accept: Callable[[Any], bool] = lambda _entry: True,
 ) -> None:
   """Sequentially register with each seed; an unreachable seed is retried until it answers."""
   for seed in seeds:
@@ -77,7 +95,7 @@ async def register_with_seeds(
     while True:
       try:
         body = await transport.post_json(f"http://{seed}/peers/register", payload)
-        merge_peer_list(registry, body, model)
+        merge_peer_list(registry, body, model, accept)
         logger.info("registered with seed peer %s", seed)
         break
       except asyncio.CancelledError:
