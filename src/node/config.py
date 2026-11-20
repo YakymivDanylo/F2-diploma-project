@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from node.peers.registry import is_loopback_host
+
 ConsensusMode = Literal["pow", "pbft"]
 _MODES = ("pow", "pbft")
+MIN_FUTURE_SKEW_MS = 1000
+_TOKEN = re.compile(r"[0-9a-f]{16}")  # BYZANTINE_RESET_ON_BOOT (see pbft.engine.RESET_TOKEN)
 
 
 class ConfigError(ValueError):
@@ -40,6 +45,16 @@ class NodeConfig:
   startup_sync_timeout_s: float  # bound on the load -> sync -> serve wait (UC-3-EC4)
   sync_interval_s: float  # periodic chain sync with peers once serving
   pbft_round_timeout_s: float  # PBFT: a stuck round or unreachable primary -> view change
+  allow_loopback_peers: bool = False  # local single-machine development only
+  # PBFT: start although the PBFT state file is missing while the chain has blocks (explicit
+  # operator decision; by default the engine fails closed: a lost vote record could let this
+  # node vote twice in a view it already voted in)
+  pbft_allow_missing_state: bool = False
+  # PBFT: operator reset of the sticky `byzantine_event_detected` status after the incident was
+  # dealt with. A one-shot DIGEST token (16 lowercase hex chars) of exactly the persisted event
+  # list, logged at every boot that restores events; the reset happens only when it matches, so
+  # a value forgotten in an env file never erases evidence recorded later. None (unset) = none.
+  byzantine_reset_on_boot: str | None = None
 
 
 def _get(env: Mapping[str, str], key: str, default: str | None = None) -> str:
@@ -108,6 +123,17 @@ def _flag(env: Mapping[str, str], key: str) -> bool:
   raise ConfigError(f"{key} must be one of 0/1/true/false, got {raw!r}")
 
 
+def _optional_token(env: Mapping[str, str], key: str) -> str | None:
+  """A 16-lowercase-hex-char token, or None when the variable is unset or blank."""
+  raw = env.get(key)
+  if raw is None or raw.strip() == "":
+    return None
+  value = raw.strip()
+  if not _TOKEN.fullmatch(value):
+    raise ConfigError(f"{key} must be the 16-hex-char token logged at boot, got {value[:32]!r}")
+  return value
+
+
 def load_config(env: Mapping[str, str] | None = None) -> NodeConfig:
   """Build the config from `env` (default: the process environment).
 
@@ -127,10 +153,19 @@ def load_config(env: Mapping[str, str] | None = None) -> NodeConfig:
     if typed_mode == "pow"
     else None
   )
+  node_host = _get(source, "NODE_HOST", "localhost")
+  seed_peers = _csv(source, "SEED_PEERS", "")
+  allow_loopback_peers = _flag(source, "ALLOW_LOOPBACK_PEERS")
+  if seed_peers and is_loopback_host(node_host) and not allow_loopback_peers:
+    raise ConfigError(
+      f"NODE_HOST={node_host!r} with SEED_PEERS set: a node announced as localhost is "
+      "unreachable from its peers (set a reachable NODE_HOST, or ALLOW_LOOPBACK_PEERS=1 for "
+      "single-machine development)"
+    )
   return NodeConfig(
     node_id=_get(source, "NODE_ID"),
     issuer_id=_get(source, "ISSUER_ID"),
-    node_host=_get(source, "NODE_HOST", "localhost"),
+    node_host=node_host,
     node_port=_int(source, "NODE_PORT", 8000, minimum=1, maximum=65535),
     consensus_mode=typed_mode,
     expected_difficulty=difficulty,
@@ -139,12 +174,14 @@ def load_config(env: Mapping[str, str] | None = None) -> NodeConfig:
     chain_path=Path(_get(source, "CHAIN_PATH")),
     validators_path=Path(_get(source, "VALIDATORS_PATH")),
     issuers_path=Path(_get(source, "ISSUERS_PATH")),
-    seed_peers=_csv(source, "SEED_PEERS", ""),
+    seed_peers=seed_peers,
     cors_origins=_csv(source, "CORS_ORIGINS", "http://localhost:5173"),
-    max_page_size=_int(source, "MAX_PAGE_SIZE", 100, minimum=1),
+    max_page_size=_int(source, "MAX_PAGE_SIZE", 100, minimum=1, maximum=1000),
     max_metadata_bytes=_int(source, "METADATA_MAX_BYTES", 1024, minimum=1, maximum=1_048_576),
     mempool_max_size=_int(source, "MEMPOOL_MAX_SIZE", 10_000, minimum=1),
-    max_future_skew_ms=_int(source, "MAX_FUTURE_SKEW_MS", 60_000, minimum=0),
+    # also the staleness bound for inbound PoW blocks: 0 would reject honest blocks after any
+    # propagation delay, so at least 1 s
+    max_future_skew_ms=_int(source, "MAX_FUTURE_SKEW_MS", 60_000, minimum=MIN_FUTURE_SKEW_MS),
     forward_ack_timeout_ms=_strict_int(
       source, "FORWARD_ACK_TIMEOUT_MS", 2000, minimum=1, maximum=60_000
     ),
@@ -152,4 +189,7 @@ def load_config(env: Mapping[str, str] | None = None) -> NodeConfig:
     startup_sync_timeout_s=_float(source, "STARTUP_SYNC_TIMEOUT_S", 10.0, minimum=0.0),
     sync_interval_s=_float(source, "SYNC_INTERVAL_S", 5.0, minimum=0.05),
     pbft_round_timeout_s=_float(source, "PBFT_ROUND_TIMEOUT_S", 5.0, minimum=0.05),
+    allow_loopback_peers=allow_loopback_peers,
+    pbft_allow_missing_state=_flag(source, "PBFT_ALLOW_MISSING_STATE"),
+    byzantine_reset_on_boot=_optional_token(source, "BYZANTINE_RESET_ON_BOOT"),
   )

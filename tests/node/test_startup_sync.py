@@ -25,7 +25,8 @@ from sync_helpers import ListFetcher, run
 from blockchain_core import Block, JsonChainStore, sha256_hex
 from blockchain_core.storage.chain_store import ChainStoreMissingError, decode_chain
 from node.config import load_config
-from node.main import build_node_context, create_app
+from node.context import build_node_context
+from node.main import create_app
 
 _NETWORK_OPTIONS = {
   "scan_interval": 0.01,

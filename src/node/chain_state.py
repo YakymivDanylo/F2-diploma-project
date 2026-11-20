@@ -6,12 +6,24 @@ by exactly one `asyncio.Lock`. `append` (a mined or broadcast block) and `replac
 adopted by sync) are serialised by that lock, so an append can never interleave with a replace:
 the result is always wholly old-plus-appends or wholly new-plus-appends (UC-17).
 
+The CPU- and disk-heavy work never runs on the event loop: `append` runs its extension check
+and `store.save` in a worker thread (inside the lock), and `replace` validates its candidate
+OUTSIDE the lock - a long validation never blocks appends, mining or finalization - then takes
+the lock and installs only if `prefer` (the adoption rule, which also checks that the trusted
+block the candidate was validated from is still ours) still holds against the chain current at
+that moment. Local appends meanwhile therefore do not invalidate it - a PoW node on a minority
+fork that keeps mining still converges, however long the validation takes. Without a `prefer`
+the candidate is refused as stale once the chain changed (`generation` moved); the next sync
+round re-judges it.
+
 `store.save` is the commit point of both operations: if it raises, the chain is unchanged and
 the exception propagates with the lock released. What follows it - rebinding the tuple, the
 validity cache, the document index and the mempool - is in-memory only, with no `await` in
-between, so a reader on the event loop never observes a half-installed chain. Readers get the
-tuple itself: it cannot change under them, and the blocks in it are frozen (UC-17-EC3), which is
-the contract the Slice 33b snapshot copy builds on.
+between, so a reader on the event loop never observes a half-installed chain. A caller
+cancelled while its save runs still installs what was saved (memory never lags the disk) and
+then sees the cancellation. Readers get the tuple itself: it cannot change under them, and the
+blocks in it are frozen (UC-17-EC3), which is the contract a future chain-snapshot (copy)
+feature can build on.
 """
 
 from __future__ import annotations
@@ -151,20 +163,22 @@ class ChainState:
       if any(self._documents.contains(r.document_hash) for r in block.document_records):
         logger.warning("rejected a block at height %d: re-issues a finalized hash", block.index)
         return False  # cross-block document_hash uniqueness (node-layer policy)
-      result = self._validator.extension(tip, [block])
+      result = await asyncio.to_thread(self._validator.extension, tip, [block])
       if not result.valid:
         logger.warning("rejected a block at height %d: failed validation", block.index)
         return False
       position = len(self._blocks)
       new_blocks = (*self._blocks, block)
       snapshot = self._cache.plan_append(block, result)  # fallible work before the commit
-      self._store.save(new_blocks)  # the commit point; only infallible steps follow
+      cancelled = await self._persist(new_blocks)  # the commit point; only infallible steps follow
       self._blocks = new_blocks
       self._generation += 1
       self._cache.install(block, snapshot)
       self._documents.add_block(block, position)  # index first, then de-queue (no gap)
       self._mempool.remove([record.document_hash for record in block.document_records])
-      return True
+    if cancelled:
+      raise asyncio.CancelledError
+    return True
 
   async def replace(
     self,
@@ -175,37 +189,49 @@ class ChainState:
   ) -> bool:
     """Install `new_chain` if `validate` (the FR-25 checklist) accepts it.
 
-    `prefer(current, candidate)` is the adoption rule; it runs under the lock against the chain
-    current at that moment, so appends that landed while the caller waited for the lock count
-    (a candidate that is no longer better is refused). A synchronous `validate` runs in a worker
-    thread so a long full-from-genesis validation does not stall the event loop; the lock is
-    held meanwhile, so queued appends wait and then run against whichever chain is current.
+    `validate` runs OUTSIDE the lock (a synchronous one in a worker thread), so a long
+    validation stalls neither the event loop nor appends. The install then happens under the
+    lock only if `prefer(current, candidate)`, the adoption rule, still holds against the
+    chain current at that moment (it is also asked once before validating, to skip validating
+    a candidate that is not better). `prefer` is the caller's contract that the validation
+    result is still sound against `current`: sync validates a suffix from a shared ancestor -
+    our own trusted block - and its `prefer` checks that this ancestor is still in our trusted
+    chain, so appends that landed meanwhile cannot invalidate the verdict and are re-judged by
+    the rule instead of making the candidate stale. Without a `prefer`, any change of the chain
+    meanwhile (`generation` moved) makes the candidate stale: False, and the caller's next
+    round re-judges it.
     Records of dropped blocks that the new chain does not hold go back to the mempool, so an
     acknowledged submission is never silently lost.
     """
     candidate = tuple(_frozen(b) for b in new_chain)  # validate and install this exact object
+    if not candidate:
+      return False
+    generation = self._generation
+    if prefer is not None and not prefer(self._blocks, candidate):
+      return False
+    result = await self._check(validate, candidate)
+    if not result.valid:
+      logger.warning(
+        "refused a replacement chain: %s at index %s",
+        result.failure_type,
+        result.first_invalid_index,
+      )
+      return False
     async with self._lock:
-      if not candidate:
+      moved = self._generation != generation
+      if prefer is None:
+        if moved:
+          logger.info("refused a replacement chain: the chain changed while it was validated")
+          return False
+      elif not prefer(self._blocks, candidate):
+        if moved:
+          logger.info("refused a replacement chain: it no longer wins against the current chain")
         return False
-      if prefer is not None and not prefer(self._blocks, candidate):
-        return False
-      if inspect.iscoroutinefunction(validate) or inspect.iscoroutinefunction(
-        getattr(validate, "__call__", None)  # noqa: B004 - an object with an async __call__
-      ):
-        result = await validate(candidate)  # type: ignore[misc]
-      else:
-        outcome = await asyncio.to_thread(validate, candidate)
-        result = await outcome if inspect.isawaitable(outcome) else outcome
-      if not result.valid:
-        logger.warning(
-          "refused a replacement chain: %s at index %s",
-          result.failure_type,
-          result.first_invalid_index,
-        )
-        return False
+      elif moved:
+        logger.info("the chain changed while a replacement was validated; it still wins")
       snapshot = self._cache.plan_replace(candidate, result)  # fallible work before the commit
       old = self.trusted_blocks  # only records of validated blocks may be re-queued
-      self._store.save(candidate)  # the commit point; only infallible steps follow
+      cancelled = await self._persist(candidate)  # the commit point; only infallible steps follow
       self._blocks = candidate
       self._extendable = True
       self._generation += 1
@@ -217,7 +243,40 @@ class ChainState:
           listener(candidate)
         except Exception:
           logger.exception("a replace listener failed; the replace stands")
-      return True
+    if cancelled:
+      raise asyncio.CancelledError
+    return True
+
+  @staticmethod
+  async def _check(validate: ChainCheck, candidate: tuple[Block, ...]) -> ValidationResult:
+    if inspect.iscoroutinefunction(validate) or inspect.iscoroutinefunction(
+      getattr(validate, "__call__", None)  # noqa: B004 - an object with an async __call__
+    ):
+      return await validate(candidate)  # type: ignore[misc]
+    outcome = await asyncio.to_thread(validate, candidate)
+    return await outcome if inspect.isawaitable(outcome) else outcome
+
+  async def _persist(self, blocks: tuple[Block, ...]) -> bool:
+    """`store.save(blocks)` in a worker thread. A save cannot be called back once it runs, so
+    a cancellation meanwhile is deferred until it finished: True tells the caller to install
+    what was saved and only then re-raise. A save error propagates (nothing was installed) -
+    unless the caller was cancelled meanwhile: then the error is logged and the cancellation is
+    re-raised (chained to it), so a cancelled caller always sees its CancelledError."""
+    saving = asyncio.ensure_future(asyncio.to_thread(self._store.save, blocks))
+    cancelled = False
+    while True:
+      try:
+        await asyncio.shield(saving)
+        return cancelled
+      except asyncio.CancelledError:
+        if saving.cancelled():
+          raise
+        cancelled = True
+      except Exception as exc:
+        if not cancelled:
+          raise
+        logger.error("chain save failed while the caller was cancelled; nothing installed: %r", exc)
+        raise asyncio.CancelledError from exc
 
   def _settle_mempool(self, old: tuple[Block, ...], new: tuple[Block, ...]) -> None:
     """Records finalized by the new chain leave the mempool; under PoW, records of dropped

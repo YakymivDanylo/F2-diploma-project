@@ -20,15 +20,26 @@ from node.validation_gateway import ChainValidator
 QUORUM_HEALTHY = "healthy"
 QUORUM_INVALID = "quorum_invalid"  # the chain failed the commit-quorum check
 # A Byzantine event was observed: two differently-finalized PBFT blocks at one height (UC-3-EC1)
-# or a validator signing two different votes / blocks for one slot (UC-6-E2, UC-8-E4). Sticky: a
-# safety violation stays visible until an operator restarts the node.
+# or a validator signing two different votes / blocks for one slot (UC-6-E2, UC-8-E4). Sticky:
+# never cleared at run time. Under PBFT the events are persisted in the engine's state file, so
+# a restart does NOT clear it either; only an explicit operator reset (`BYZANTINE_RESET_ON_BOOT`)
+# does. PoW keeps no PBFT state file: there a restart starts with an empty log.
 QUORUM_BYZANTINE = "byzantine_event_detected"
 # PBFT liveness, reported by the engine (UC-6-E5, UC-12-EC1). Never conflated with the above:
 # a crash fault is "not enough members respond", a Byzantine event is "a member lied".
 QUORUM_VIEW_CHANGE = "view_change_in_progress"
 QUORUM_CRASH_LOSS = "crash_fault_quorum_loss"
 LIVENESS_STATES = frozenset({QUORUM_HEALTHY, QUORUM_VIEW_CHANGE, QUORUM_CRASH_LOSS})
-MAX_BYZANTINE_EVENTS = 32  # most recent kept for GET /node/info
+# The Byzantine event log behind GET /node/info is bounded PER OFFENDER, so one Byzantine member
+# signing conflicts in fresh (view, seq) slots - a distinct event each time - cannot evict the
+# evidence against another offender: the FIRST event of every offender is kept for good, and at
+# most MAX_EVENTS_PER_OFFENDER per offender (a newer one replaces that offender's oldest
+# non-first event). At most MAX_OFFENDERS distinct offenders (`None`, "unattributed", counts as
+# one) are logged; a further offender only raises the sticky status. Offenders are ValidatorSet
+# ids or sets of them, so the cap is not reached in practice.
+MAX_EVENTS_PER_OFFENDER = 4
+MAX_OFFENDERS = 32
+MAX_BYZANTINE_EVENTS = MAX_EVENTS_PER_OFFENDER * MAX_OFFENDERS  # overall bound (128)
 
 
 @dataclass(frozen=True)
@@ -38,6 +49,25 @@ class CacheSnapshot:
   failure_type: str | None
   tip_index: int
   quorum_status: str
+
+
+def _event_key(event: dict[str, object]) -> tuple[object, object]:
+  return (event["reason"], event["offender"])
+
+
+def _admit(events: list[dict[str, object]], event: dict[str, object]) -> None:
+  """Add `event` to the chronological log `events` in place, by the per-offender policy above;
+  deduplicated on (reason, offender) - a divergence sync re-detects every round is kept once."""
+  key = _event_key(event)
+  if any(_event_key(e) == key for e in events):
+    return
+  offender = event["offender"]
+  mine = [i for i, e in enumerate(events) if e["offender"] == offender]
+  if not mine and len({e["offender"] for e in events}) >= MAX_OFFENDERS:
+    return
+  if len(mine) >= MAX_EVENTS_PER_OFFENDER:
+    del events[mine[1]]  # the offender's oldest non-first event; its first stays
+  events.append(event)
 
 
 def _snapshot(result: ValidationResult, tip_index: int) -> CacheSnapshot:
@@ -90,7 +120,7 @@ class ValidityCache:
     """Boot: reuse the restore-time `result` when given, else validate fully once."""
     outcome = result if result is not None else self._validator.full(blocks)
     self._tip = blocks[-1]
-    self._snapshot = _snapshot(outcome, len(blocks) - 1)
+    self._snapshot = self._sticky(_snapshot(outcome, len(blocks) - 1))
 
   # Each event is split into a fallible `plan_*` (computes the next snapshot, changes nothing)
   # and an infallible `install`, so `ChainState` can do all fallible work before it persists.
@@ -120,13 +150,35 @@ class ValidityCache:
     self._tip = tip
     self._snapshot = self._sticky(snapshot)
 
-  def flag_byzantine_event(self, reason: str = "", *, offender: str | None = None) -> None:
-    """Surface a safety violation via `quorum_status` (sticky until the node restarts) and the
-    event log; only `ChainState` calls this."""
-    self._events.append({"reason": reason, "offender": offender, "at_ms": int(time.time() * 1000)})
-    del self._events[:-MAX_BYZANTINE_EVENTS]
+  def flag_byzantine_event(
+    self, reason: str = "", *, offender: str | None = None, at_ms: int | None = None
+  ) -> None:
+    """Surface a safety violation via `quorum_status` (sticky) and the event log; only
+    `ChainState` calls this. Under PBFT the engine persists the log in its state file, so the
+    status and the events survive a restart (`restore_byzantine_events`)."""
+    when = at_ms if at_ms is not None else int(time.time() * 1000)
+    _admit(self._events, {"reason": reason, "offender": offender, "at_ms": when})
+    self._mark_byzantine()
+
+  def restore_byzantine_events(self, events: Sequence[dict[str, object]]) -> None:
+    """Events persisted before a restart: put back ahead of any reported since boot (bounded
+    and deduplicated like `flag_byzantine_event`) and the sticky status restored - not
+    reported again as new events."""
+    if not events:
+      return
+    restored = [
+      {"reason": e["reason"], "offender": e["offender"], "at_ms": e["at_ms"]} for e in events
+    ]
+    merged: list[dict[str, object]] = []
+    for event in [*restored, *self._events]:
+      _admit(merged, event)
+    self._events = merged
+    self._mark_byzantine()
+
+  def _mark_byzantine(self) -> None:
     self._byzantine = True
-    self._snapshot = self._sticky(self._raw())
+    if self._snapshot is not None:
+      self._snapshot = self._sticky(self._snapshot)
 
   def _raw(self) -> CacheSnapshot:
     if self._snapshot is None:

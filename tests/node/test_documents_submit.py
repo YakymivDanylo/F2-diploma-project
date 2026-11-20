@@ -18,9 +18,10 @@ from blockchain_core import (
 )
 from node.clock import reject_future_timestamp
 from node.config import load_config
+from node.context import NodeContext
 from node.errors import ApiError
 from node.forwarding import PrimaryStatus
-from node.main import NodeContext, create_app
+from node.main import create_app
 
 H1 = sha256_hex(b"submit-1")
 H2 = sha256_hex(b"submit-2")

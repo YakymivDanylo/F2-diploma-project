@@ -8,7 +8,8 @@ from node_helpers import NodeEnv
 
 from blockchain_core import sha256_hex
 from node.config import load_config
-from node.main import NodeContext, create_app
+from node.context import NodeContext
+from node.main import create_app
 from node.metrics import ConsensusMetric, MetricsRecorder
 
 

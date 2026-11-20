@@ -20,7 +20,8 @@ from blockchain_core import (
 )
 from node.config import load_config
 from node.consensus.pow import PowEngine
-from node.main import NodeContext, build_node_context, create_app
+from node.context import NodeContext, build_node_context
+from node.main import create_app
 
 
 def _env(node_env: NodeEnv, difficulty: int = 1, mode: str = "pow") -> dict[str, str]:

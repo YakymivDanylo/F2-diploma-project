@@ -14,8 +14,9 @@ from node_helpers import NodeEnv, issuer_entry, write_issuers
 
 from blockchain_core import generate_issuer_keypair, sha256_hex
 from node.config import ConfigError, load_config
+from node.context import NodeContext
 from node.forwarding import PrimaryStatus
-from node.main import NodeContext, create_app
+from node.main import create_app
 from node.registries import RegistryError, load_issuer_registry
 
 H1 = sha256_hex(b"hard-1")

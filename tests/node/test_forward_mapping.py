@@ -15,13 +15,14 @@ from node_helpers import NodeEnv
 from blockchain_core import DocumentRecord, sha256_hex, verify_document_record
 from node.api.documents import REPLY_TO_ERROR
 from node.config import ConfigError, load_config
+from node.context import NodeContext
 from node.forwarding import (
   REPLY_CODES,
   ForwardUnavailable,
   PendingForwards,
   PrimaryStatus,
 )
-from node.main import NodeContext, create_app
+from node.main import create_app
 
 H1 = sha256_hex(b"fwd-1")
 H2 = sha256_hex(b"fwd-2")
@@ -29,7 +30,7 @@ NEVER = object()
 
 
 class StubForwarder:
-  """Replies through the pending table like the Slice 17b channel will."""
+  """Replies through the pending table, like the real `forward_record` channel does."""
 
   def __init__(
     self,
@@ -218,7 +219,8 @@ def test_slow_forward_does_not_block_other_submissions(node_env: NodeEnv) -> Non
 def test_known_duplicates_never_reach_the_forwarder(node_env: NodeEnv) -> None:  # CN-TC-15.26
   save_chain(node_env, pbft_chain(node_env, 2))
   stub = StubForwarder()
-  for client, context in _serve(node_env, stub, INIT_CHAIN="0"):
+  # a seeded chain with no PBFT state file: the engine would fail closed without the override
+  for client, context in _serve(node_env, stub, INIT_CHAIN="0", PBFT_ALLOW_MISSING_STATE="true"):
     assert _post(client, sha256_hex(b"document-1")).status_code == 409  # finalized
     seeded = DocumentRecord(
       document_hash=H2, issuer_id="issuer1", issued_at=1, metadata={}, signature="00"

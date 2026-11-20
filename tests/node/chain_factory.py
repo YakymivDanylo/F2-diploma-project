@@ -19,6 +19,7 @@ from blockchain_core import (
   sign_commit,
 )
 from blockchain_core.validation import pow_target
+from node.consensus.pbft.state_store import PbftState, PbftStateStore, state_path_for
 
 BASE_TS = 1_700_000_001_000
 STEP = 1_000
@@ -100,8 +101,14 @@ def pbft_chain(env: NodeEnv, length: int, *, signers: int = 3) -> list[Block]:
 
 
 def save_chain(env: NodeEnv, blocks: list[Block]) -> None:
-  store = JsonChainStore(Path(env.env["CHAIN_PATH"]))
+  """Persist a chain as a node would have left it: with its (empty) PBFT state file, so a
+  restarted PBFT node does not fail closed on a missing state (it never voted here)."""
+  chain_path = Path(env.env["CHAIN_PATH"])
+  store = JsonChainStore(chain_path)
   try:
     store.save(blocks)
   finally:
     store.close()
+  state = PbftStateStore(state_path_for(chain_path))
+  if not state.exists():
+    state.save(PbftState())

@@ -35,6 +35,7 @@ from typing import Any, Literal
 
 from blockchain_core import Block, commit_payload, sign_canonical, verify_canonical
 from blockchain_core.keys import PrivateKey, PublicKey
+from node.patterns import HASH_RE, NODE_ID_RE, SIGNATURE_RE
 
 PRE_PREPARE = "pbft_pre_prepare"
 PREPARE = "pbft_prepare"
@@ -57,9 +58,6 @@ NO_BLOCK = "0" * 64  # a view-change vote from a node that is not locked on any 
 
 MAX_COUNTER = 2**53  # view / seq: JSON-safe and far beyond any real chain
 MAX_VOTES = 64  # prepares in a certificate / votes in a new-view: bounded by the ValidatorSet
-_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
-_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-_SIG_RE = re.compile(r"^(?:[0-9a-f]{2}){1,512}$")  # whole bytes only
 
 Kind = Literal[
   "pbft_pre_prepare", "pbft_prepare", "pbft_commit", "pbft_view_change", "pbft_new_view"
@@ -276,13 +274,16 @@ def decode_cert(raw: object) -> PreparedCert:
   for item in prepares:
     entry = _exact(item, {"node_id", "signature"}, "cert prepare")
     pairs.append(
-      (_text(entry["node_id"], _ID_RE, "node_id"), _text(entry["signature"], _SIG_RE, "signature"))
+      (
+        _text(entry["node_id"], NODE_ID_RE, "node_id"),
+        _text(entry["signature"], SIGNATURE_RE, "signature"),
+      )
     )
   return PreparedCert(
     view=_counter(data["view"], "view"),
     seq=_counter(data["seq"], "seq"),
-    block_hash=_text(data["block_hash"], _HASH_RE, "block_hash"),
-    primary_signature=_text(data["primary_signature"], _SIG_RE, "signature"),
+    block_hash=_text(data["block_hash"], HASH_RE, "block_hash"),
+    primary_signature=_text(data["primary_signature"], SIGNATURE_RE, "signature"),
     prepares=tuple(sorted(pairs)),
   )
 
@@ -292,9 +293,9 @@ def _decode_vote(raw: object) -> Vote:
   return Vote(
     view=_counter(data["view"], "view"),
     seq=_counter(data["seq"], "seq"),
-    block_hash=_text(data["block_hash"], _HASH_RE, "block_hash"),
-    node_id=_text(data["node_id"], _ID_RE, "node_id"),
-    signature=_text(data["signature"], _SIG_RE, "signature"),
+    block_hash=_text(data["block_hash"], HASH_RE, "block_hash"),
+    node_id=_text(data["node_id"], NODE_ID_RE, "node_id"),
+    signature=_text(data["signature"], SIGNATURE_RE, "signature"),
   )
 
 
@@ -334,9 +335,9 @@ def decode_message(raw: dict[str, Any]) -> PbftMessage:
     kind=kind,
     view=_counter(raw["view"], "view"),
     seq=_counter(raw["seq"], "seq"),
-    block_hash=_text(raw["block_hash"], _HASH_RE, "block_hash"),
-    node_id=_text(raw["node_id"], _ID_RE, "node_id"),
-    signature=_text(raw["signature"], _SIG_RE, "signature"),
+    block_hash=_text(raw["block_hash"], HASH_RE, "block_hash"),
+    node_id=_text(raw["node_id"], NODE_ID_RE, "node_id"),
+    signature=_text(raw["signature"], SIGNATURE_RE, "signature"),
     block=block,
     cert=None if cert_raw is None else decode_cert(cert_raw),
     votes=votes,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -8,9 +9,12 @@ from fastapi.testclient import TestClient
 from node_helpers import NodeEnv, pem_of
 
 from blockchain_core import generate_node_keypair
+from blockchain_core.keys import NodeKeyPair
 from node.api.peers import PeerOut
 from node.config import load_config
-from node.main import NodeContext, create_app
+from node.context import NodeContext
+from node.main import create_app
+from node.peers.attestation import sign_registration
 from node.peers.registry import PeerRegistry
 from node.peers.seed_registration import register_with_seeds
 
@@ -21,12 +25,23 @@ def _serve(env: dict[str, str], **kwargs: Any) -> Iterator[tuple[TestClient, Nod
     yield client, app.state.context
 
 
-def _payload(node_id: str = "peerA", host: str = "10.0.0.5", port: int = 9001, pem=None):
+def _payload(
+  node_id: str = "peerA",
+  host: str = "10.0.0.5",
+  port: int = 9001,
+  key: NodeKeyPair | None = None,
+) -> dict[str, Any]:
+  """A registration signed by the key it registers (proof of possession)."""
+  key = key or generate_node_keypair()
+  pem = pem_of(key)
+  issued_at = int(time.time() * 1000)
   return {
     "node_id": node_id,
     "host": host,
     "port": port,
-    "public_key": pem or pem_of(generate_node_keypair()),
+    "public_key": pem,
+    "issued_at": issued_at,
+    "signature": sign_registration(key.private_key, node_id, host, port, pem, issued_at),
   }
 
 
@@ -59,10 +74,10 @@ def test_fresh_node_lists_empty(node_env: NodeEnv) -> None:  # CN-TC-2.2
 
 def test_reregistration_updates_without_duplicate(node_env: NodeEnv) -> None:  # CN-TC-1.8
   for client, context in _serve(node_env.env):
-    pem = pem_of(generate_node_keypair())
-    client.post("/peers/register", json=_payload(pem=pem))
+    key = generate_node_keypair()
+    client.post("/peers/register", json=_payload(key=key))
     first = client.get("/peers").json()["peers"][0]["last_seen"]
-    client.post("/peers/register", json=_payload(host="10.0.0.9", port=9100, pem=pem))
+    client.post("/peers/register", json=_payload(host="10.0.0.9", port=9100, key=key))
     peers = client.get("/peers").json()["peers"]
     assert len(peers) == 1
     assert (peers[0]["host"], peers[0]["port"]) == ("10.0.0.9", 9100)
@@ -109,10 +124,10 @@ def test_self_registration_is_ignored(node_env: NodeEnv) -> None:  # CN-TC-1.10
 def test_flood_does_not_change_quorum_values(node_env: NodeEnv) -> None:  # CN-TC-1.11
   for client, context in _serve(node_env.env):
     before = client.get("/node/info").json()
-    pem = pem_of(generate_node_keypair())
-    for i in range(2000):
-      assert client.post("/peers/register", json=_payload(f"sybil{i}", pem=pem)).status_code == 200
-    assert len(context.peers) == 2000
+    key = generate_node_keypair()
+    for i in range(300):
+      assert client.post("/peers/register", json=_payload(f"sybil{i}", key=key)).status_code == 200
+    assert len(context.peers) == 256  # bounded: the stale-most entries made room
     after = client.get("/node/info").json()
     assert (after["n"], after["f"]) == (before["n"], before["f"]) == (4, 1)
     assert after["quorum_status"] == before["quorum_status"]
@@ -148,7 +163,7 @@ def test_unreachable_seed_is_retried_with_backoff() -> None:  # CN-TC-1.7
 
   asyncio.run(
     register_with_seeds(
-      ("seed1:8000",), {}, registry, transport, PeerOut, sleep=fake_sleep, max_delay=3.0
+      ("seed1:8000",), {}, registry, transport, PeerOut, sleep=fake_sleep, max_delay=3.0, rounds=1
     )
   )
   assert len(transport.calls) == 4
@@ -156,7 +171,7 @@ def test_unreachable_seed_is_retried_with_backoff() -> None:  # CN-TC-1.7
   assert [p.node_id for p in registry.list()] == ["seed1"]
 
 
-def test_multiple_seeds_registered_sequentially_and_merged() -> None:  # CN-TC-1.2
+def test_multiple_seeds_registered_and_merged() -> None:  # CN-TC-1.2
   registry = PeerRegistry("me")
   bodies = {
     "a:1": {"peers": [_own_peer(pem_of(generate_node_keypair()))]},
@@ -177,13 +192,13 @@ def test_multiple_seeds_registered_sequentially_and_merged() -> None:  # CN-TC-1
       return bodies[seed]
 
   transport = Transport()
-  asyncio.run(register_with_seeds(("a:1", "b:2"), {}, registry, transport, PeerOut))
-  assert transport.order == ["a:1", "b:2"]
+  asyncio.run(register_with_seeds(("a:1", "b:2"), {}, registry, transport, PeerOut, rounds=1))
+  assert sorted(transport.order) == ["a:1", "b:2"]
   assert {p.node_id for p in registry.list()} == {"seed1", "seed2"}
 
 
 def test_unreachable_seed_does_not_block_startup(node_env: NodeEnv) -> None:  # CN-TC-1.7
-  env = {**node_env.env, "SEED_PEERS": "ghost:9"}
+  env = {**node_env.env, "SEED_PEERS": "ghost:9", "NODE_HOST": "node1.example"}
   transport = _FakeTransport(10**9, {})
 
   async def instant_sleep(_: float) -> None:

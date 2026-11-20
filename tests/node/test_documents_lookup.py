@@ -11,7 +11,8 @@ from node_helpers import NodeEnv, issuer_entry, write_issuers
 
 from blockchain_core import DocumentRecord, ProofStep, sha256_hex, verify_proof
 from node.config import load_config
-from node.main import NodeContext, create_app
+from node.context import NodeContext
+from node.main import create_app
 
 
 def _serve(node_env: NodeEnv, blocks, **env: str) -> Iterator[tuple[TestClient, NodeContext]]:
@@ -126,5 +127,5 @@ def test_node_info_reports_the_institution(node_env: NodeEnv) -> None:  # CN-TC-
   write_issuers(node_env, [issuer_entry("issuer1", node_env.issuer_key, name="Institution A")])
   for client, _ in _serve(node_env, pbft_chain(node_env, 1)):
     body = client.get("/node/info").json()
-    assert len(body) == 14
+    assert len(body) == 15
     assert (body["issuer_id"], body["issuer_name"]) == ("issuer1", "Institution A")

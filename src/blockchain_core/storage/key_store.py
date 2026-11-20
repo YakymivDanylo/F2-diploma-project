@@ -4,15 +4,21 @@ Files are created with restrictive permissions from the first byte (no
 write-then-chmod window), written to a temporary sibling and then moved into place, so a
 crash never leaves a truncated key and a symlink planted at the target is never followed.
 
-On Windows the POSIX mode bits do not restrict who can read a file: protect the key
-directory with an ACL instead. Private keys are stored unencrypted (PEM, no passphrase).
+Loading refuses a private-key file that is a symlink and, on POSIX, one whose mode grants
+any access to group or other (`mode & 0o077`), raising `KeyStoreInsecureError`.
+
+On Windows the POSIX mode bits do not restrict who can read a file, so the mode check is
+skipped there: protect the key directory with an ACL instead. Private keys are stored
+unencrypted (PEM, no passphrase).
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import secrets
+import stat
 from pathlib import Path
 
 from cryptography.exceptions import UnsupportedAlgorithm
@@ -39,6 +45,30 @@ class KeyStoreMissingError(FileNotFoundError):
 
 class KeyStoreCorruptedError(ValueError):
   """Raised when a key-store file exists but cannot be parsed as a valid private key."""
+
+
+class KeyStoreInsecureError(PermissionError):
+  """Raised when a private-key file is a symlink, not a regular file, or (POSIX) is
+  accessible by group/other - the key may already be exposed or substituted."""
+
+
+# Mode bits are only meaningful on POSIX; Windows protects files with ACLs instead.
+_POSIX = os.name == "posix"
+
+
+def fsync_directory(directory: Path) -> None:
+  """Make a rename inside `directory` durable (POSIX); a no-op on Windows.
+
+  `os.replace` is atomic but only reaches the disk once the directory entry is flushed,
+  so after a crash the old file could otherwise reappear.
+  """
+  if not _POSIX:
+    return
+  fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+  try:
+    os.fsync(fd)
+  finally:
+    os.close(fd)
 
 
 class IssuerKeyUnavailableError(KeyStoreMissingError):
@@ -68,6 +98,7 @@ def _write_file(path: Path, data: bytes, mode: int, *, force: bool) -> None:
         raise KeyStoreExistsError(
           f"key store already exists at {path}; pass force=True to overwrite"
         ) from exc
+    fsync_directory(path.parent)
   finally:
     with contextlib.suppress(FileNotFoundError):
       os.unlink(temp)
@@ -86,12 +117,39 @@ def save_key_pair(key_pair: KeyPair, path: str | Path, *, force: bool = False) -
   _write_file(public_path, public_key_to_pem(key_pair.public_key), 0o644, force=force)
 
 
+def _read_key_bytes(private_path: Path) -> bytes:
+  """Read a private-key file, refusing symlinks and (POSIX) group/other-accessible modes."""
+  if private_path.is_symlink():
+    raise KeyStoreInsecureError(f"refusing private key at {private_path}: it is a symlink")
+  if not _POSIX:
+    return private_path.read_bytes()
+  flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+  try:
+    fd = os.open(private_path, flags)
+  except OSError as exc:
+    if exc.errno != errno.ELOOP:
+      raise
+    # The path was swapped for a symlink after the check above.
+    raise KeyStoreInsecureError(f"refusing private key at {private_path}: it is a symlink") from exc
+  with os.fdopen(fd, "rb") as handle:
+    mode = os.fstat(handle.fileno()).st_mode
+    if not stat.S_ISREG(mode):
+      raise KeyStoreInsecureError(f"refusing private key at {private_path}: not a regular file")
+    if mode & 0o077:
+      raise KeyStoreInsecureError(
+        f"refusing private key at {private_path}: mode {stat.S_IMODE(mode):04o} grants "
+        "access to group/other (expected 0600)"
+      )
+    return handle.read()
+
+
 def _read_private_key(path: str | Path, missing: KeyStoreMissingError) -> PrivateKey:
   private_path = Path(path)
-  if not private_path.exists():
+  if not private_path.is_symlink() and not private_path.exists():
     raise missing
+  data = _read_key_bytes(private_path)
   try:
-    return private_key_from_pem(private_path.read_bytes())
+    return private_key_from_pem(data)
   except (ValueError, TypeError, UnsupportedAlgorithm) as exc:
     # TypeError: an encrypted PEM; UnsupportedAlgorithm: a key type cryptography rejects.
     raise KeyStoreCorruptedError(f"key store at {private_path} is corrupted: {exc}") from exc

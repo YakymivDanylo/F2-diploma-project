@@ -2,6 +2,31 @@
 
 Never mutated at runtime and never derived from peers. An identity may appear several
 times (key rotation) but at most once without `retired_at`.
+
+Each entry's key is in force over a closed interval `[valid_from, retired_at]` (epoch ms,
+both inclusive). `retired_at` null means open-ended. `valid_from` is optional: when it is
+absent or null the key starts right after the identity's previous key retires, or at the
+beginning of time for the identity's first key (the behaviour of files written before
+`valid_from` existed). One identity's intervals must not overlap, and at no instant may
+more than `n` validator identities have a key in force (otherwise two quorums computed
+for `n` could share fewer than `f + 1` nodes).
+
+Operators: a first key with `valid_from` absent or null is valid from the beginning of time,
+so it verifies signatures at ANY past timestamp. That is right for the genesis identities,
+but an identity added after genesis (a new validator or a new institution) should set
+`valid_from` to the instant it joins; otherwise its key could back-date blocks or records to
+before it existed.
+
+Revocation: `revoked` (optional, default false) marks a compromised key. Retirement alone
+cannot stop back-dating: a retired key still resolves at timestamps inside its interval, so
+whoever holds it can still sign blocks / records dated then and serve them through sync. A
+revoked entry's key NEVER resolves, at any timestamp, so everything it ever signed stops
+validating: old blocks or records signed by a compromised key become invalid and must be
+re-validated / re-issued under a non-revoked key. A revoked entry still counts as an
+identity occurrence (its interval takes part in the overlap and n-in-force checks, and its
+id stays a known ValidatorSet id), but it holds no key. To rotate a revoked identity give the
+revoked entry a `retired_at` and add a new entry after it. The node's own keys must resolve
+now at boot, so a node whose own key is revoked refuses to start.
 """
 
 from __future__ import annotations
@@ -26,6 +51,26 @@ class KeyEntry:
   public_key: PublicKey
   retired_at: int | None
   name: str | None = None  # issuer entries only: optional human-readable institution name
+  valid_from: int | None = None  # first instant (epoch ms) the key is in force; None = see module
+  revoked: bool = False  # compromised: the key never resolves, at any timestamp (see module)
+
+
+@dataclass(frozen=True)
+class KeyInterval:
+  """When one key is in force: `start`..`end` inclusive; None = unbounded on that side.
+
+  `public_key` is None for a revoked entry: the interval still occupies the identity's
+  timeline (overlap and n-in-force checks) but no key resolves in it.
+  """
+
+  start: int | None
+  end: int | None
+  public_key: PublicKey | None
+
+  def covers(self, at_timestamp: int) -> bool:
+    return (self.start is None or at_timestamp >= self.start) and (
+      self.end is None or at_timestamp <= self.end
+    )
 
 
 MAX_NAME_LENGTH = 100
@@ -54,6 +99,75 @@ class IssuerRegistry:
       if entry.identity == issuer_id and entry.name is not None:
         return entry.name
     return issuer_id
+
+
+def _fmt(bound: int | None, open_word: str) -> str:
+  return open_word if bound is None else str(bound)
+
+
+def key_intervals(
+  entries: tuple[KeyEntry, ...] | list[KeyEntry], what: str = "registry"
+) -> dict[str, tuple[KeyInterval, ...]]:
+  """Per identity, the key intervals in time order; raises RegistryError on any overlap."""
+  grouped: dict[str, list[KeyEntry]] = {}
+  for entry in entries:
+    grouped.setdefault(entry.identity, []).append(entry)
+  result: dict[str, tuple[KeyInterval, ...]] = {}
+  for identity, items in grouped.items():
+    items.sort(key=lambda e: (e.retired_at is None, e.retired_at or 0))
+    intervals: list[KeyInterval] = []
+    for entry in items:
+      if (
+        entry.valid_from is not None
+        and entry.retired_at is not None
+        and entry.valid_from > entry.retired_at
+      ):
+        raise RegistryError(
+          f"{what}: {identity!r} has 'valid_from' {entry.valid_from} after "
+          f"'retired_at' {entry.retired_at}"
+        )
+      previous = intervals[-1] if intervals else None
+      start = entry.valid_from
+      if start is None and previous is not None and previous.end is not None:
+        start = previous.end + 1
+      if previous is not None and (previous.end is None or start is None or start <= previous.end):
+        raise RegistryError(
+          f"{what}: {identity!r} has overlapping key intervals: "
+          f"[{_fmt(previous.start, 'beginning')}, {_fmt(previous.end, 'open')}] and "
+          f"[{_fmt(start, 'beginning')}, {_fmt(entry.retired_at, 'open')}]"
+        )
+      key = None if entry.revoked else entry.public_key
+      intervals.append(KeyInterval(start=start, end=entry.retired_at, public_key=key))
+    result[identity] = tuple(intervals)
+  return result
+
+
+def check_concurrent_validators(
+  intervals: dict[str, tuple[KeyInterval, ...]], n: int, what: str = "ValidatorSet"
+) -> None:
+  """Fail if more than `n` identities have a key in force at any instant.
+
+  The count only changes at a key's start or the instant after its end, so checking time 0
+  and those boundary points covers every instant.
+  """
+  points = {0}
+  for items in intervals.values():
+    for interval in items:
+      if interval.start is not None:
+        points.add(interval.start)
+      if interval.end is not None:
+        points.add(interval.end + 1)
+  for point in sorted(points):
+    in_force = sorted(
+      identity
+      for identity, items in intervals.items()
+      if any(interval.covers(point) for interval in items)
+    )
+    if len(in_force) > n:
+      raise RegistryError(
+        f"{what}: {len(in_force)} validators have a key in force at {point} but n={n}: "
+        + ", ".join(in_force)
+      )
 
 
 def active_entry(entries: tuple[KeyEntry, ...], identity: str) -> KeyEntry | None:
@@ -125,6 +239,12 @@ def _parse_entries(
     retired_at = item.get("retired_at")
     if retired_at is not None and (type(retired_at) is not int or retired_at < 0):
       raise RegistryError(f"{what}: {identity!r} has an invalid 'retired_at'")
+    valid_from = item.get("valid_from")
+    if valid_from is not None and (type(valid_from) is not int or valid_from < 0):
+      raise RegistryError(f"{what}: {identity!r} has an invalid 'valid_from'")
+    revoked = item.get("revoked", False)
+    if type(revoked) is not bool:
+      raise RegistryError(f"{what}: {identity!r} has a non-boolean 'revoked'")
     try:
       key = public_key_from_pem(pem.encode("utf-8"))
     except Exception as exc:
@@ -134,7 +254,17 @@ def _parse_entries(
         raise RegistryError(f"{what}: {identity!r} has more than one active (non-retired) key")
       active.add(identity)
     name = _parse_name(item, identity, what) if allow_name else None
-    entries.append(KeyEntry(identity=identity, public_key=key, retired_at=retired_at, name=name))
+    entries.append(
+      KeyEntry(
+        identity=identity,
+        public_key=key,
+        retired_at=retired_at,
+        name=name,
+        valid_from=valid_from,
+        revoked=revoked,
+      )
+    )
+  key_intervals(entries, what)  # rejects overlapping or inverted intervals
   if allow_name:
     _check_names(entries, what)
   return tuple(entries)
@@ -152,6 +282,7 @@ def load_validator_registry(path: Path) -> ValidatorRegistry:
     registry.to_core()  # enforces len(members) >= n >= 3f + 1
   except ValueError as exc:
     raise RegistryError(f"{what}: {exc}") from exc
+  check_concurrent_validators(key_intervals(entries, what), n, what)
   return registry
 
 

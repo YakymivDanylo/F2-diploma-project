@@ -16,6 +16,12 @@ blocks and the mempool (`duplicate`), else 7 queue (`accepted`). Check 6 and the
 one atomic step under the same lock as the primary's own `POST /documents`. The primary never
 re-signs or reassigns a forwarded record. A full mempool answers `not_primary` (retryable).
 
+A non-validator (PeerInfo) peer is answered too - `auth_failed` or, once its signature
+verifies, `not_validator` - because the binding order puts authentication first: the node
+spends one signature check on it before it learns the sender may not forward at all. That
+cost is bounded by the network layer, which caps a non-validator link's frames at 64 KiB (and
+by `MAX_IN_FLIGHT_PER_PEER` here), so the order is kept as UC-16 specifies.
+
 The sender-side `WsRecordForwarder` sends to the primary only and accepts a reply only from the
 node it sent the request to; a late, duplicated or never-issued reply is dropped by
 `PendingForwards`.
@@ -25,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING, Any
@@ -39,10 +44,12 @@ from blockchain_core import (
 )
 from blockchain_core.keys import PrivateKey, PublicKey
 from blockchain_core.storage.chain_store import record_from_dict
+from node.admission import is_known, mempool_full
 from node.forwarding import REPLY_CODES, ForwardUnavailable, PendingForwards
+from node.patterns import CID_RE, HASH_RE, NODE_ID_RE, REQUEST_ID_RE, SIGNATURE_RE
 
 if TYPE_CHECKING:
-  from node.main import NodeContext
+  from node.context import NodeContext
 
 logger = logging.getLogger("node.forward")
 
@@ -50,13 +57,8 @@ FORWARD = "forward_record"
 FORWARD_REPLY = "forward_record_reply"
 FORWARD_TYPES = frozenset({FORWARD, FORWARD_REPLY})
 FORWARD_DOMAIN = "node/forward-record/v1"
-_REQUEST_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
-_SIG_RE = re.compile(r"^(?:[0-9a-f]{2}){1,512}$")
 MAX_TRACKED_REQUESTS = 4096
 MAX_IN_FLIGHT_PER_PEER = 4  # forward_record requests judged at once per link; more are dropped
-_CID_RE = re.compile(r"^[A-Za-z0-9]{1,128}$")
 
 Send = Callable[[dict[str, Any], Iterable[str]], Awaitable[dict[str, bool]]]
 
@@ -138,9 +140,9 @@ class RecordIntake:
     key = self._lookup_key(peer_id) if sender == peer_id else None
     if (
       not isinstance(sender, str)
-      or not _ID_RE.fullmatch(sender)
+      or not NODE_ID_RE.fullmatch(sender)
       or not isinstance(signature, str)
-      or not _SIG_RE.fullmatch(signature)
+      or not SIGNATURE_RE.fullmatch(signature)
       or not isinstance(request_id, str)
       or key is None
     ):
@@ -170,11 +172,11 @@ class RecordIntake:
     try:
       record = record_from_dict(raw)
       if (
-        not _HASH_RE.fullmatch(record.document_hash)
-        or not _ID_RE.fullmatch(record.issuer_id)
+        not HASH_RE.fullmatch(record.document_hash)
+        or not NODE_ID_RE.fullmatch(record.issuer_id)
         or not isinstance(record.signature, str)
-        or not _SIG_RE.fullmatch(record.signature)
-        or (record.ipfs_cid is not None and not _CID_RE.fullmatch(record.ipfs_cid))
+        or not SIGNATURE_RE.fullmatch(record.signature)
+        or (record.ipfs_cid is not None and not CID_RE.fullmatch(record.ipfs_cid))
       ):
         raise ValueError("malformed record")
       if len(canonicalize(dict(record.metadata))) > context.config.max_metadata_bytes:
@@ -183,7 +185,8 @@ class RecordIntake:
         raise ValueError("issued_at too far from now")  # forwarded records are signed just now
     except Exception:
       return "invalid_record"
-    # (4. IssuerRegistry membership - Epic 6, Slice 31b; until then a resolver miss -> 5)
+    # (4. no separate IssuerRegistry-membership step as built - the Epic 6 gap: an unknown
+    # issuer is a resolver miss and fails at 5)
     # 5. record signature, with the issuer key from the resolver
     issuer_key = context.resolvers.current.resolve_issuer_key(record.issuer_id, now)
     if issuer_key is None or not await asyncio.to_thread(
@@ -194,15 +197,9 @@ class RecordIntake:
     async with context.submission_lock:
       if not self._is_primary():
         return "not_primary"  # a view change began while we checked: never queue then
-      if (
-        context.chain_state.has_document(record.document_hash)
-        or context.mempool.contains(record.document_hash)
-        or record.document_hash in context.inflight
-      ):
+      if is_known(context, record.document_hash):
         return "duplicate"
-      if len(context.mempool) + len(
-        context.inflight
-      ) >= context.config.mempool_max_size or self._quota_full(sender):
+      if mempool_full(context) or self._quota_full(sender):
         return "not_primary"  # full (overall, or this sender's share): retryable
       context.mempool.add(record)  # as signed by the sender: never re-signed or reassigned
       self._by_sender.setdefault(sender, set()).add(record.document_hash)
@@ -247,7 +244,7 @@ class ForwardChannel:
       self._on_reply(peer_id, message)
       return
     request_id = message.get("request_id")
-    if not isinstance(request_id, str) or not _REQUEST_ID_RE.fullmatch(request_id):
+    if not isinstance(request_id, str) or not REQUEST_ID_RE.fullmatch(request_id):
       self._flag(peer_id, "malformed forward_record")  # no request id to answer to
       return
     if set(message) != {"type", "request_id", "record", "sender_id", "sender_signature"}:

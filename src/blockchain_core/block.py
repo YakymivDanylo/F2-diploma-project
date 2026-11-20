@@ -24,6 +24,7 @@ __all__ = [
   "EmptyBatchError",
   "InvalidBlockParametersError",
   "InvalidRecordSignatureError",
+  "MAX_BLOCK_RECORDS",
   "attach_proposer_signature",
   "build_candidate_block",
   "commit_payload",
@@ -34,6 +35,11 @@ __all__ = [
 # bare preimage, so neither a `proposer_signature` nor any other message a node signs can
 # be replayed as a commit vote. Every further message type must carry its own domain.
 COMMIT_DOMAIN = "blockchain_core/pbft-commit/v1"
+
+# Upper bound on `document_records` per block. Record signatures are verified per record,
+# so the bound caps the verification work a single (possibly Byzantine) block can force;
+# `build_candidate_block` refuses larger batches and validation reports them "structural".
+MAX_BLOCK_RECORDS = 500
 
 
 class InvalidRecordSignatureError(ValueError):
@@ -165,13 +171,18 @@ def build_candidate_block(
 
   Verifies every record's signature first - against the issuer key valid at `timestamp`,
   exactly as `validate_chain` will - naming the offending index on failure. Rejects an
-  empty batch and a batch containing a repeated `document_hash`, never silently
-  deduplicating. Only then computes `merkle_root` and `block_hash` over the canonical
-  preimage. Never attaches `proposer_signature` - see `attach_proposer_signature`.
+  empty batch, a batch of more than `MAX_BLOCK_RECORDS` records, and a batch containing
+  a repeated `document_hash`, never silently deduplicating. Only then computes
+  `merkle_root` and `block_hash` over the canonical preimage. Never attaches
+  `proposer_signature` - see `attach_proposer_signature`.
   """
   _check_parameters(previous_hash, index, proposer_id, algorithm)
   if not records:
     raise EmptyBatchError("cannot build a candidate block from zero document records")
+  if len(records) > MAX_BLOCK_RECORDS:
+    raise InvalidBlockParametersError(
+      f"a block holds at most {MAX_BLOCK_RECORDS} document records, got {len(records)}"
+    )
   _verify_batch_signatures(records, timestamp, resolve_issuer_key)
   _reject_duplicate_document_hashes(records)
 

@@ -12,22 +12,30 @@ class _TooLarge(BaseException):  # not Exception: framework body readers must no
   pass
 
 
+DEFAULT_BODY_LIMIT = 16 * 1024  # any HTTP path without its own limit
+PEER_REGISTER_BODY_LIMIT = 8 * 1024  # a signed registration is well under 4 KiB
+
+
 class BodyLimitMiddleware:
-  """413 for a POST to a limited path whose body exceeds its byte limit.
+  """413 for any HTTP request whose body exceeds the limit of its path (`limits`, else
+  `default`), whatever the method: no route can be used to buffer an unbounded body.
 
   Checks Content-Length up front and counts streamed chunks, so a chunked upload without a
   length header is stopped as soon as it crosses the limit.
   """
 
-  def __init__(self, app: ASGIApp, limits: dict[str, int]) -> None:
+  def __init__(
+    self, app: ASGIApp, limits: dict[str, int], default: int = DEFAULT_BODY_LIMIT
+  ) -> None:
     self.app = app
     self.limits = limits
+    self.default = default
 
   async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-    limit = self.limits.get(scope.get("path", "")) if scope["type"] == "http" else None
-    if limit is None or scope["method"] != "POST":
+    if scope["type"] != "http":  # websockets carry their own frame limits
       await self.app(scope, receive, send)
       return
+    limit = self.limits.get(scope.get("path", ""), self.default)
     declared = dict(scope["headers"]).get(b"content-length")
     if declared is not None and declared.isdigit() and int(declared) > limit:
       await self._reject(send, limit)

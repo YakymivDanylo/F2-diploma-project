@@ -2,8 +2,8 @@
 
 This module defines the interface, the closed reply enum, the primary-status seam and the
 pending-request table. The real channel (`forward_record` on the authenticated peer link),
-sender authentication and the primary-side acceptance are `node.consensus.pbft.forward`
-(Slice 17b). The proposer never re-signs a forwarded record.
+sender authentication and the primary-side acceptance live in `node.consensus.pbft.forward`
+and are installed by `node.main` under PBFT. The proposer never re-signs a forwarded record.
 """
 
 from __future__ import annotations
@@ -83,7 +83,8 @@ class RecordForwarder(Protocol):
 
 
 class UnavailableForwarder:
-  """Default until Slice 17b: no channel exists, so a forward is a connection failure."""
+  """The forwarder before (or without) a network: no channel exists, so a forward is a
+  connection failure. Under PBFT `node.main` replaces it with `WsRecordForwarder`."""
 
   async def send(self, request_id: str, record: DocumentRecord, primary_id: str) -> None:
     raise ForwardUnavailable("no forwarding channel to the primary is established")
@@ -134,7 +135,7 @@ class ForwardService:
     self._new_request_id = new_request_id
 
   def use(self, forwarder: RecordForwarder) -> None:
-    """Install the real channel once the network exists (Slice 17b)."""
+    """Install the real channel once the network exists (`WsRecordForwarder`)."""
     self._forwarder = forwarder
 
   async def forward(self, record: DocumentRecord, primary_id: str) -> str:

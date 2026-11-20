@@ -3,6 +3,21 @@
 Signatures are lowercase hex, and only one encoding of each signature verifies:
 non-canonical hex (uppercase, whitespace, odd length) and high-S ECDSA values are
 rejected, so a relayer cannot re-encode a signature into a different, still-valid one.
+
+Signature domains. Only PBFT commit votes (and every node-layer message) carry an
+explicit `domain` key; `proposer_signature` and document-record signatures do not, and
+adding one would change every block hash and invalidate stored chains, so it is
+intentionally not done. It is still safe: a signature is always over the canonical bytes
+of a JSON object, and every signed payload kind has a distinct key set, so the bytes of
+one kind can never parse as another and no signature can be replayed as a different kind:
+
+- document record: {document_hash, issuer_id, issued_at, metadata, ipfs_cid}
+- block preimage (proposer signature): {index, timestamp, previous_hash, merkle_root,
+  proposer_id, algorithm, sealed_consensus}
+- PBFT commit vote and every node-layer payload: objects carrying a `domain` key, which
+  neither of the two kinds above has.
+
+Record and node keys are also separate roles (`IssuerKeyPair` vs `NodeKeyPair`).
 """
 
 from __future__ import annotations

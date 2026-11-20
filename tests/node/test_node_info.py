@@ -9,8 +9,9 @@ from node_helpers import NodeEnv
 
 from blockchain_core import public_key_to_pem
 from node.config import load_config
+from node.context import NodeContext
 from node.key_resolver import CombinedKeyResolver, ResolverHolder
-from node.main import NodeContext, create_app
+from node.main import create_app
 from node.validity_cache import ChainValidator, ValidityCache
 
 FIELDS = {
@@ -28,6 +29,7 @@ FIELDS = {
   "issuer_id",
   "issuer_name",
   "peer_health",
+  "serving",
 }
 
 

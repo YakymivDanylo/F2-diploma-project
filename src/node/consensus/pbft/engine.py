@@ -26,24 +26,36 @@ voter's lock; the new primary re-proposes the block with the highest certified v
 that may be final somewhere is never replaced. Votes and the lock are persisted (atomically,
 before a vote is sent), so a restarted node keeps them. There is no state transfer, checkpoint
 or watermark protocol (intentional simplification, UC-6-D): lagging nodes catch up by sync.
+A missing state file is accepted only on a fresh chain (or with `allow_missing_state`, the
+operator's explicit `PBFT_ALLOW_MISSING_STATE`); otherwise the engine refuses to start.
 
 Faults are classified, never conflated (UC-6-E2 vs UC-6-E5): a member that signs two
 different votes for one slot is reported as a Byzantine event (sticky); too few responsive
 members is reported as `crash_fault_quorum_loss`; an open view change as
-`view_change_in_progress`; one member down is normal operation.
+`view_change_in_progress`; one member down is normal operation. Byzantine events (the engine's
+own and those `ChainState` reports from sync) are persisted with the voting state and restored
+into the validity cache on restart, so the sticky status survives it; only the operator's
+explicit `reset_byzantine_events` (`BYZANTINE_RESET_ON_BOOT`) drops them on a boot, and only
+when it names the DIGEST of exactly the persisted event list (`byzantine_reset_token`, logged
+at every boot that restores events): a one-shot token, so a value left in an env file is refused
+as soon as the evidence changed in any way.
+
+Round state and the pure counting rules live in `rounds.py`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import Counter, deque
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from blockchain_core import (
+  MAX_BLOCK_RECORDS,
   Block,
   CommitSignature,
   DocumentRecord,
@@ -51,10 +63,9 @@ from blockchain_core import (
   attach_proposer_signature,
   build_candidate_block,
   commit_payload,
-  public_key_to_pem,
+  sha256_of_canonical,
   verify_canonical,
 )
-from blockchain_core.keys import PublicKey
 from blockchain_core.storage.chain_store import block_from_dict, block_to_dict
 from node.consensus.pbft.messages import (
   COMMIT,
@@ -75,18 +86,30 @@ from node.consensus.pbft.messages import (
   verify_message,
   verify_vote,
 )
+from node.consensus.pbft.rounds import (
+  Lock,
+  Round,
+  build_certificate,
+  count_prepare_votes,
+  key_id,
+  verified_commit_votes,
+)
 from node.consensus.pbft.state_store import PbftState, PbftStateError, PbftStateStore
 from node.consensus.pbft.view_change import MAX_VIEWS_AHEAD, ViewChangeState
 from node.metrics import ConsensusMetric
 from node.validity_cache import QUORUM_CRASH_LOSS, QUORUM_HEALTHY, QUORUM_VIEW_CHANGE
 
 if TYPE_CHECKING:
-  from node.main import NodeContext
+  from node.context import NodeContext
 
 logger = logging.getLogger("node.pbft")
 
-DEFAULT_MAX_BATCH = 500
+__all__ = ["Lock", "PbftEngine", "Round"]
+
+DEFAULT_MAX_BATCH = MAX_BLOCK_RECORDS  # a block never holds more (the core refuses it)
 DEFAULT_RESEND_S = 1.0
+# Only the constructor's fallback (tests): the source of truth is config's PBFT_ROUND_TIMEOUT_S,
+# which `node.main` always passes as `round_timeout_s`.
 DEFAULT_ROUND_TIMEOUT_S = 5.0
 RETRY_SECONDS = 1.0
 TRANSIENT_REASONS = frozenset({"timestamp_in_future", "timestamp_too_old"})
@@ -96,47 +119,23 @@ MAX_WATCHED = 1024
 CENSORSHIP_TIMEOUTS = 3  # round timeouts a forwarded, accepted record may take to finalize
 MAX_NEW_VIEW_JUMP = 1024  # a proof is quorum-signed; this only bounds the work per message
 
+RESET_TOKEN = re.compile(r"^[0-9a-f]{16}$")  # BYZANTINE_RESET_ON_BOOT
+
+
+def byzantine_reset_token(events: list[dict[str, Any]]) -> str:
+  """The one-shot `BYZANTINE_RESET_ON_BOOT` token for exactly this persisted event list (as
+  stored): the first 16 hex chars of SHA-256 over its canonical JSON. Any change to the
+  evidence - a new event, or one replaced under the per-offender cap - changes the token, so a
+  forgotten value can never erase newer evidence."""
+  return sha256_of_canonical(events)[:16]
+
+
 # send(message, targets): targets None = every ValidatorSet member
 Send = Callable[[dict[str, Any], Iterable[str] | None], Awaitable[object]]
 
 
 def _wall_ms() -> int:
   return int(time.time() * 1000)
-
-
-def _key_id(key: PublicKey) -> bytes:
-  return public_key_to_pem(key)
-
-
-@dataclass(frozen=True)
-class Lock:
-  """This node prepared `block` at `cert.seq`, proven by `cert`."""
-
-  cert: PreparedCert
-  block: Block
-
-
-@dataclass
-class Round:
-  """Votes for one `(view, seq)`. At most ONE vote per member per phase is ever counted."""
-
-  view: int
-  seq: int
-  candidate: Block | None = None  # the locked-in pre-prepared block, once screened as valid
-  primary: str | None = None  # who pre-prepared it (= primary_of(view)): its implicit prepare
-  pre_prepare_signature: str | None = None
-  rejected: set[str] = field(default_factory=set)  # candidate hashes that failed screening
-  prepares: dict[str, tuple[str, str]] = field(default_factory=dict)  # node -> (hash, sig)
-  commits: dict[str, tuple[str, str]] = field(default_factory=dict)  # node -> (hash, sig)
-  verified_commits: dict[str, bool] = field(default_factory=dict)  # node_id -> signature ok
-  conflicts: list[tuple[Kind, str, str, str]] = field(default_factory=list)  # evidence
-  conflicted: set[tuple[Kind, str]] = field(default_factory=set)  # bounds `conflicts`
-  prepared: bool = False
-  finalizing: bool = False
-  failed_votes: frozenset[str] | None = None  # a vote set whose block `ChainState` refused
-  outbox: list[dict[str, Any]] = field(default_factory=list)  # our own messages, for resend
-  started_wall: int = 0
-  opened_at: float | None = None  # monotonic time of the first activity (round timeout)
 
 
 class PbftEngine:
@@ -154,14 +153,22 @@ class PbftEngine:
     max_batch: int = DEFAULT_MAX_BATCH,
     resend_s: float = DEFAULT_RESEND_S,
     round_timeout_s: float = DEFAULT_ROUND_TIMEOUT_S,
+    allow_missing_state: bool = False,
+    reset_byzantine_events: str | None = None,
     now_ms: Callable[[], int] = _wall_ms,
     monotonic: Callable[[], float] = time.monotonic,
   ) -> None:
     validator_set = context.validator.validator_set
     if validator_set is None:
       raise ValueError("PBFT needs a ValidatorSet")
-    if max_batch < 1 or resend_s <= 0 or round_timeout_s <= 0:
-      raise ValueError("max_batch must be >= 1, resend_s and round_timeout_s > 0")
+    if reset_byzantine_events is not None and not (
+      isinstance(reset_byzantine_events, str) and RESET_TOKEN.fullmatch(reset_byzantine_events)
+    ):
+      raise ValueError("reset_byzantine_events must be a 16-hex-char reset token")
+    if not 1 <= max_batch <= MAX_BLOCK_RECORDS or resend_s <= 0 or round_timeout_s <= 0:
+      raise ValueError(
+        f"max_batch must be in 1..{MAX_BLOCK_RECORDS}, resend_s and round_timeout_s > 0"
+      )
     self._context = context
     self._chain_state = context.chain_state
     self._validator_set = validator_set
@@ -179,8 +186,16 @@ class PbftEngine:
     self._self_id = context.config.node_id
     self._key = context.state.node_key.private_key
 
-    persisted = state_store.load() if state_store is not None else PbftState()
+    if allow_missing_state:  # a forgotten flag in an env file silently disables the guard
+      logger.warning(
+        "PBFT_ALLOW_MISSING_STATE is set: a missing PBFT state file will NOT stop this node "
+        "(risk of a conflicting vote); unset it after the one start it was meant for"
+      )
+    persisted = self._load_state(state_store, allow_missing_state)
     self._persisted = persisted
+    if not self._reset_byzantine_events(state_store, persisted, reset_byzantine_events):
+      # Events observed before a restart: sticky status and evidence back, not re-reported.
+      context.validity_cache.restore_byzantine_events(persisted.byzantine_events)
     self._signed = persisted.signed  # never sign two hashes per (view, seq) - durable
     self._lock: Lock | None = None
     tip_view = self._tip_view()
@@ -222,6 +237,80 @@ class PbftEngine:
     # A sync replace mid-round (UC-17 side effect): the listener runs inside the ChainState
     # lock, so it only wakes the engine; the engine task drops the stale round itself.
     self._chain_state.add_replace_listener(lambda _blocks: self._wake.set())
+
+  def _load_state(self, state_file: PbftStateStore | None, allow_missing: bool) -> PbftState:
+    """The persisted voting state. A missing file on a chain past genesis fails CLOSED: this
+    node may have voted at a height it has not finalized yet, and an empty state would let it
+    sign a second vote for that `(view, seq)` or drop its lock. On a fresh chain (tip index 0)
+    nothing can have been signed, so the file is created at once - a node that then syncs
+    blocks and restarts before it ever votes still finds its (empty) state."""
+    if state_file is None:
+      return PbftState()
+    if state_file.exists():
+      return state_file.load()
+    tip_index = self._chain_state.tip.index
+    if tip_index > 0 and not allow_missing:
+      raise PbftStateError(
+        f"PBFT state file {state_file.path} is missing but the chain is at height {tip_index}: "
+        "this node may already have voted, and starting with an empty state could make it "
+        "sign a conflicting vote or forget its lock. Restore the file, or - only if you are "
+        "sure the node never voted at the open height - set PBFT_ALLOW_MISSING_STATE=true "
+        "for one start."
+      )
+    if tip_index > 0:
+      logger.warning(
+        "PBFT state file %s missing at height %d; starting empty (PBFT_ALLOW_MISSING_STATE)",
+        state_file.path,
+        tip_index,
+      )
+    state = PbftState()
+    state_file.save(state)  # durable at once: a later restart finds it
+    return state
+
+  @staticmethod
+  def _reset_byzantine_events(
+    state_file: PbftStateStore | None, persisted: PbftState, token: str | None
+  ) -> bool:
+    """`BYZANTINE_RESET_ON_BOOT=<token>`: the operator has dealt with the reported safety
+    violation. Every boot that finds persisted events logs their current token. Only when
+    `token` equals it are the events dropped (not restored, and cleared from the state file at
+    once), so the sticky status starts clean; the votes and the lock are kept untouched. Any
+    other value is refused and nothing is discarded (a value forgotten in an env file must not
+    erase evidence recorded since); False tells the caller to restore the events as usual."""
+    events = persisted.byzantine_events
+    current = byzantine_reset_token(events)
+    if events:
+      logger.warning(
+        "%d persisted Byzantine event(s) restored as sticky evidence; after dealing with the "
+        "incident, reset them once with BYZANTINE_RESET_ON_BOOT=%s (valid only for exactly "
+        "these events) and unset it after that start",
+        len(events),
+        current,
+      )
+    if token is None:
+      return False
+    if token != current:
+      logger.warning(
+        "BYZANTINE_RESET_ON_BOOT=%s REFUSED: it does not match the %d persisted Byzantine "
+        "event(s) (current token %s), so nothing is discarded (a stale value must not erase "
+        "newer evidence)",
+        token,
+        len(events),
+        current,
+      )
+      return False
+    logger.warning(
+      "BYZANTINE_RESET_ON_BOOT=%s: operator reset of the Byzantine status; %d persisted "
+      "event(s) discarded: %s; unset the variable now",
+      token,
+      len(events),
+      events,
+    )
+    if events:
+      persisted.byzantine_events = []
+      if state_file is not None:
+        state_file.save(persisted)
+    return True
 
   # ---------------------------------------------------------------- views / roles
 
@@ -267,7 +356,8 @@ class PbftEngine:
 
   def primary_status(self) -> tuple[str, str | None]:
     """("self" | "other" | "none", primary id): "none" while a view change is open or no
-    quorum of members is responsive - for the Slice 17b `not_primary` reply."""
+    quorum of members is responsive - for the `forward_record` / `POST /documents`
+    `not_primary` reply."""
     primary = self.primary_of(self.view)
     if primary is None or self._vc.in_progress or self._liveness == QUORUM_CRASH_LOSS:
       return "none", None
@@ -371,6 +461,8 @@ class PbftEngine:
         del self._queued[message.node_id]
       await self._process(message)
       self._tip_moved()
+    if self._persisted.byzantine_events != self._context.validity_cache.byzantine_events:
+      self._dirty = True  # an event ChainState reported (e.g. from sync): persist it too
     if self._dirty:
       self._dirty = False
       await self._persist()
@@ -512,7 +604,7 @@ class PbftEngine:
       members=self._validator_set.members,
       quorum=self.quorum,
       resolve_key=lambda node_id: resolver.resolve_node_key(node_id, now),
-      key_id=_key_id,
+      key_id=key_id,
     )
 
   # ---------------------------------------------------------------- sending
@@ -553,13 +645,18 @@ class PbftEngine:
   async def _persist(self) -> None:
     if self._store is None:
       return
-    self._persisted.view = self.view
-    self._persisted.signed = self._signed
-    self._persisted.vc_vote = self._vc_wire if self._vc.in_progress else None
-    self._persisted.lock = (
-      None
-      if self._lock is None
-      else {"cert": self._lock.cert.to_wire(), "block": block_to_dict(self._lock.block)}
+    # The worker thread serializes a SNAPSHOT taken here on the loop: the live `_signed` dict
+    # (and the other fields) may change while `to_json` iterates them in the thread.
+    self._persisted = PbftState(
+      view=self.view,
+      signed=dict(self._signed),
+      lock=(
+        None
+        if self._lock is None
+        else {"cert": self._lock.cert.to_wire(), "block": block_to_dict(self._lock.block)}
+      ),
+      vc_vote=dict(self._vc_wire) if self._vc.in_progress and self._vc_wire is not None else None,
+      byzantine_events=[dict(e) for e in self._context.validity_cache.byzantine_events],
     )
     await asyncio.to_thread(self._store.save, self._persisted)
 
@@ -700,7 +797,7 @@ class PbftEngine:
       # else is screened for this slot. During a view change we no longer vote in this view.
       return
     records = message.block.get("document_records")
-    if not isinstance(records, list) or len(records) > self._max_batch:
+    if not isinstance(records, list) or len(records) > min(self._max_batch, MAX_BLOCK_RECORDS):
       await self._reject_candidate(current, message, "malformed or oversized block")
       return
     if not self._verified(message):
@@ -842,71 +939,23 @@ class PbftEngine:
   def _report_byzantine(self, offender: str, reason: str) -> None:
     self._flag(offender, "equivocation")
     self._chain_state.report_byzantine_event(reason, offender=offender)
+    self._dirty = True  # the event is persisted by this step (see `_step`)
 
   # ---------------------------------------------------------------- quorum logic
 
   def prepare_votes(self, current: Round) -> int:
-    """Distinct members that prepared the candidate. Counting rule (UC-6 step 3, closes M-7):
-    the primary's pre-prepare IS its prepare vote - it is counted here once, implicitly - and
-    the primary never sends (and we never count) a separate prepare message from it."""
-    if current.candidate is None:
-      return 0
-    target = current.candidate.block_hash
-    primary = current.primary  # the pre-prepare's sender, frozen when the candidate locked in
-    explicit = sum(
-      1
-      for node_id, (voted, _sig) in current.prepares.items()
-      if voted == target and node_id != primary and node_id in self._validator_set.members
-    )
-    return 1 + explicit
-
-  def _certificate(self, current: Round) -> PreparedCert:
-    assert current.candidate is not None and current.pre_prepare_signature is not None
-    target = current.candidate.block_hash
-    return PreparedCert(
-      view=current.view,
-      seq=current.seq,
-      block_hash=target,
-      primary_signature=current.pre_prepare_signature,
-      prepares=tuple(
-        sorted(
-          (node_id, sig)
-          for node_id, (voted, sig) in current.prepares.items()
-          if voted == target and node_id != current.primary
-        )
-      ),
-    )
+    """Distinct members that prepared the candidate (see `rounds.count_prepare_votes`)."""
+    return count_prepare_votes(current, self._validator_set.members)
 
   def commit_votes(self, current: Round) -> dict[str, str]:
-    """Matching, valid commit votes by member - one per member AND per key, verified at the
-    candidate's timestamp, the same rule the core's quorum check applies. Counted only once
-    THIS node is prepared: a commit received earlier is held, never acted on, so commits
-    alone can never finalize a block (phase ordering, UC-6-E3)."""
-    candidate = current.candidate
-    if candidate is None or not current.prepared:
-      return {}
-    payload = commit_payload(candidate.block_hash)
-    resolver = self._context.resolvers.current
-    counted: dict[str, str] = {}
-    keys: set[bytes] = set()
-    for node_id, (voted, signature) in sorted(current.commits.items()):
-      if voted != candidate.block_hash or node_id not in self._validator_set.members:
-        continue
-      key = resolver.resolve_node_key(node_id, candidate.timestamp)
-      if key is None:
-        continue
-      fingerprint = _key_id(key)
-      if fingerprint in keys:
-        continue
-      ok = current.verified_commits.get(node_id)
-      if ok is None:
-        ok = current.verified_commits[node_id] = verify_canonical(key, payload, signature)
-        if not ok:
-          self._flag(node_id, "commit: bad signature")
-      if ok:
-        counted[node_id] = signature
-        keys.add(fingerprint)
-    return counted
+    """Matching, valid commit votes by member, counted once THIS node is prepared (see
+    `rounds.verified_commit_votes`)."""
+    return verified_commit_votes(
+      current,
+      self._validator_set.members,
+      self._context.resolvers.current.resolve_node_key,
+      on_bad_signature=lambda node_id: self._flag(node_id, "commit: bad signature"),
+    )
 
   async def _advance(self, current: Round) -> None:
     candidate = current.candidate
@@ -918,7 +967,7 @@ class PbftEngine:
       and not self._vc.in_progress  # after a view-change vote we no longer vote in this view
       and self.prepare_votes(current) >= self.quorum
     ):
-      cert = self._certificate(current)
+      cert = build_certificate(current)
       if not self._cert_ok(cert):
         logger.error("prepared certificate for %d does not verify; not committing", current.seq)
         return

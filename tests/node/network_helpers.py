@@ -17,7 +17,8 @@ from blockchain_core import Block, save_key_pair
 from blockchain_core.storage.chain_store import decode_chain
 from node.api.chain import chain_page
 from node.config import load_config
-from node.main import NodeContext, create_app
+from node.context import NodeContext
+from node.main import create_app
 from node.network.connection_manager import ConnectionClosed, PeerConnectionManager
 
 _CLOSED = object()

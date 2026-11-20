@@ -8,7 +8,8 @@ peer" shortcut: a block from any sender gets the same checklist.
 `ChainValidator` binds the injected consensus parameters and the resolver holder, so each
 call site validates with the same checklist and keys. `ValidationGateway.screen` adds the
 cheap pre-checks an inbound block needs before the full extension check: authenticity,
-duplicate / conflicting / stale classification, and the wall-clock skew cap.
+duplicate / conflicting / stale classification, and the wall-clock skew window (a PoW block
+must also not be older than the window: see `screen`).
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Literal
 
 from blockchain_core import (
   Block,
@@ -51,9 +52,7 @@ def first_duplicate_document(
 
 
 def _duplicate(index: int) -> ValidationResult:
-  return ValidationResult(
-    valid=False, first_invalid_index=index, failure_type=cast(Any, "duplicate_document")
-  )
+  return ValidationResult(valid=False, first_invalid_index=index, failure_type="duplicate_document")
 
 
 class ChainValidator:
@@ -118,6 +117,7 @@ class InboundVerdict:
 
   kind: Literal["accept", "duplicate", "needs_sync", "reject"]
   reason: str = ""  # unsigned | unknown_proposer | bad_signature | conflict | timestamp_in_future
+  # | timestamp_too_old (PoW only)
   # | a core failure_type: hash, link, merkle, signature, structural, difficulty, quorum
   equivocation: bool = False  # a conflicting block validly signed by a ValidatorSet member
 
@@ -221,7 +221,15 @@ class ValidationGateway:
     return frozenset(both)
 
   def screen(self, block: Block) -> InboundVerdict:
-    """Judge a block received from any peer. Pure: it never mutates anything."""
+    """Judge a block received from any peer. Pure: it never mutates anything.
+
+    A next-height block must be stamped within the skew window of our clock. For a PoW block
+    the window has a lower bound too: otherwise a miner could back-date its block (any
+    timestamp >= the tip's passes the core monotonicity check) to a time when a since-retired,
+    possibly compromised issuer or node key still resolved. The honest miner keeps its
+    timestamp fresh while mining (`PowEngine`). PBFT blocks are exempt from the lower bound: a
+    block carried into a later view keeps its original timestamp, and its commit quorum - each
+    member screened the candidate's age when it was first proposed - is the guard."""
     signature = block.proposer_signature
     if not isinstance(signature, str) or not signature:
       return _reject("unsigned")  # UC-8-E1
@@ -257,10 +265,13 @@ class ValidationGateway:
       return _reject("conflict", equivocation=byzantine)  # first-finalized wins (UC-8-E4/EC2)
     if block.index > tip.index + 1:
       return InboundVerdict("needs_sync")
+    now = self._now_ms()
     try:
-      reject_future_timestamp(block.timestamp, now_ms=self._now_ms(), max_skew_ms=self._max_skew)
+      reject_future_timestamp(block.timestamp, now_ms=now, max_skew_ms=self._max_skew)
     except ApiError:
       return _reject("timestamp_in_future")
+    if block.algorithm == "pow" and block.timestamp < now - self._max_skew:
+      return _reject("timestamp_too_old")
     result = self.validator.extension(tip, [block])
     if not result.valid:
       return _reject(result.failure_type or "invalid")

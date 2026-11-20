@@ -9,7 +9,15 @@ from node_helpers import NodeEnv, pem_of
 
 from blockchain_core import generate_issuer_keypair, generate_node_keypair, save_key_pair
 from node.config import load_config
-from node.main import NodeContext, build_node_context
+from node.context import NodeContext, build_node_context
+from node.netguard import clear_resolution_cache
+
+
+@pytest.fixture(autouse=True)
+def _fresh_resolution_cache() -> None:
+  """netguard's DNS cache is process-wide by design: no lookup cached by one test may decide
+  another test's address check."""
+  clear_resolution_cache()
 
 
 @pytest.fixture
@@ -42,6 +50,8 @@ def node_env(tmp_path: Path) -> NodeEnv:
     "VALIDATORS_PATH": str(tmp_path / "validators.json"),
     "ISSUERS_PATH": str(tmp_path / "issuers.json"),
     "INIT_CHAIN": "1",
+    # test chains are written by `save_chain` without a PBFT state file and were never voted
+    # on by this node; the fail-closed default is covered explicitly (test_app_hardening)
   }
   return NodeEnv(
     root=tmp_path,

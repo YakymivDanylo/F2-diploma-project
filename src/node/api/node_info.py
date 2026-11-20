@@ -25,6 +25,7 @@ class NodeInfo(BaseModel):
   issuer_id: str  # the institution this node belongs to
   issuer_name: str
   peer_health: dict[str, str]  # node_id -> up | reconnecting | down (FR-12)
+  serving: bool  # readiness: False until the startup sync is done (and while shutting down)
 
 
 @router.get("/node/info", response_model=NodeInfo)
@@ -48,4 +49,5 @@ async def node_info(request: Request) -> NodeInfo:
     issuer_id=context.config.issuer_id,
     issuer_name=context.issuers.name_of(context.config.issuer_id),
     peer_health=request.app.state.manager.health(),
+    serving=bool(getattr(request.app.state, "accepting", False)),
   )

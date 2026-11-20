@@ -198,25 +198,23 @@ def test_self_heal_never_rolls_back_to_a_shorter_chain(node_env: NodeEnv) -> Non
 # ------------------------------------------------- 4. PBFT forged first-page block
 
 
-@pytest.mark.parametrize("genuine", ["same", "invalid"])
-def test_pbft_forged_tail_block_raises_no_byzantine_alarm(
-  node_env: NodeEnv, caplog: pytest.LogCaptureFixture, genuine: str
+@pytest.mark.parametrize("forgery", ["bad-hash", "no-quorum", "unsigned"])
+def test_pbft_forged_divergent_block_raises_no_byzantine_alarm(
+  node_env: NodeEnv, caplog: pytest.LogCaptureFixture, forgery: str
 ) -> None:
+  # the peer's divergent block must pass the full single-block checklist (commit quorum
+  # included) against OUR parent before two blocks at one height count as a safety violation
   slow_sync_env(node_env)
   mine = [GENESIS]
   for seed in (1, 2):
     mine.append(pbft_block(node_env, mine[-1], seed))
-  forged = [*mine[:2], dataclasses.replace(mine[2], block_hash="ab" * 32)]
-
-  class Scripted:
-    def __init__(self) -> None:
-      self.valid = ListFetcher(mine)
-      self.forged = ListFetcher(forged)
-
-    async def get_chain_page(self, host: str, port: int, from_index: int, to_index: int) -> Any:
-      # the forged block is advertised on the probe page; the from=0 download is the truth
-      source = self.forged if from_index > 0 or genuine == "invalid" else self.valid
-      return await source.get_chain_page(host, port, from_index, to_index)
+  rival = pbft_block(node_env, mine[1], 99)
+  forged_tip = {
+    "bad-hash": dataclasses.replace(mine[2], block_hash="ab" * 32),
+    "no-quorum": dataclasses.replace(rival, commit_signatures=()),
+    "unsigned": dataclasses.replace(rival, proposer_signature=""),
+  }[forgery]
+  forged = [*mine[:2], forged_tip]
 
   async def go() -> None:
     async with Cluster(
@@ -224,14 +222,14 @@ def test_pbft_forged_tail_block_raises_no_byzantine_alarm(
     ) as cluster:
       n1 = cluster["node1"]
       await install(n1, mine)
-      sync, flags = make_sync(n1, Scripted())
+      sync, flags = make_sync(n1, ListFetcher(forged))
       with caplog.at_level(logging.ERROR):
         outcome = await sync.sync_with(_peer("node2"))
-      assert outcome == ("not_better" if genuine == "same" else "invalid")
+      assert outcome == "invalid"
       assert "SAFETY VIOLATION" not in caplog.text
       assert n1.context.validity_cache.snapshot.quorum_status == QUORUM_HEALTHY
       assert blocks_of(n1) == tuple(mine)
-      assert bool(flags) == (genuine == "invalid")
+      assert len(flags) == 1 and flags[0][0] == "node2"
 
   run(go())
 
@@ -384,7 +382,9 @@ def test_http_fetcher_does_not_follow_redirects() -> None:
   server, port, hits = _http("redirect")
   try:
     with pytest.raises(OSError):  # urllib.error.HTTPError(302)
-      asyncio.run(HttpChainFetcher(timeout=2).get_chain_page("127.0.0.1", port, 0, 1))
+      asyncio.run(
+        HttpChainFetcher(timeout=2, allow_loopback=True).get_chain_page("127.0.0.1", port, 0, 1)
+      )
     assert hits == ["/chain"]  # /elsewhere was never requested
   finally:
     server.shutdown()
@@ -396,7 +396,9 @@ def test_http_fetcher_caps_the_response_size() -> None:
   try:
     with pytest.raises(SyncResponseError):
       asyncio.run(
-        HttpChainFetcher(timeout=2, max_bytes=1000).get_chain_page("127.0.0.1", port, 0, 1)
+        HttpChainFetcher(timeout=2, max_bytes=1000, allow_loopback=True).get_chain_page(
+          "127.0.0.1", port, 0, 1
+        )
       )
   finally:
     server.shutdown()
@@ -409,7 +411,9 @@ def test_http_fetcher_enforces_a_whole_request_deadline() -> None:
   try:
     started = time.monotonic()
     with pytest.raises(TimeoutError):
-      asyncio.run(HttpChainFetcher(timeout=0.5).get_chain_page("127.0.0.1", port, 0, 1))
+      asyncio.run(
+        HttpChainFetcher(timeout=0.5, allow_loopback=True).get_chain_page("127.0.0.1", port, 0, 1)
+      )
     assert time.monotonic() - started < 3.0
   finally:
     server.shutdown()

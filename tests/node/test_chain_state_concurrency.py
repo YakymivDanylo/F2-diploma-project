@@ -1,5 +1,9 @@
 """Slice 16a: `ChainState` serialises append and replace behind one asyncio lock (UC-17).
 
+Since the 2026-11-20 hardening a replace VALIDATES outside the lock and installs under it only
+if the chain did not change meanwhile (stale otherwise); append's checklist and save run in a
+worker thread inside the lock.
+
 The project does not use pytest-asyncio, so every scenario is an `async def` driven by
 `asyncio.run` from a plain test function.
 """
@@ -8,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import random
 import threading
 from collections.abc import Callable, Sequence
@@ -21,7 +26,7 @@ from node_helpers import NodeEnv
 from blockchain_core import Block, JsonChainStore, ValidationResult
 from blockchain_core.storage.chain_store import decode_chain
 from node.chain_state import ChainState
-from node.main import NodeContext
+from node.context import NodeContext
 from node.mempool import DocumentIndex, Mempool
 from node.validity_cache import ValidityCache
 
@@ -29,13 +34,18 @@ INTERLEAVINGS = 120
 
 
 class FlakyStore:
-  """A real `JsonChainStore` whose `save` can be told to fail (fault injection)."""
+  """A real `JsonChainStore` whose `save` can be told to fail or to park (fault injection)."""
 
   def __init__(self, real: JsonChainStore) -> None:
     self.real = real
     self.fail: Exception | None = None
+    self.hold: threading.Event | None = None  # save parks (in its worker thread) until set
+    self.entered = threading.Event()
 
   def save(self, blocks: Sequence[Block]) -> None:
+    self.entered.set()
+    if self.hold is not None:
+      self.hold.wait(5)
     if self.fail is not None:
       raise self.fail
     self.real.save(blocks)
@@ -144,6 +154,14 @@ class Gate:
     return self._check(chain)
 
 
+async def _until_set(event: threading.Event) -> None:
+  for _ in range(5000):
+    if event.is_set():
+      return
+    await asyncio.sleep(0.001)
+  raise AssertionError("event never set")
+
+
 def _spin(times: int = 5):
   async def run() -> None:
     for _ in range(times):
@@ -165,59 +183,73 @@ def test_context_exposes_chain_state(fx: Fixture) -> None:
 # ------------------------------------------------------------------ CN-TC-17.1
 
 
-def test_append_waits_for_replace_then_extends_new_tip(fx: Fixture, forks: Forks) -> None:
-  # CN-TC-17.1
+def test_append_during_replace_validation_is_not_blocked_and_makes_it_stale(
+  fx: Fixture, forks: Forks
+) -> None:
+  # CN-TC-17.1 (validation outside the lock): the append lands at once, and the replace that
+  # was validated against the older chain is refused as stale instead of interleaving
   async def scenario() -> None:
     state, _, path, _ = fx.make(forks.old)
     gate = Gate(fx.validator.full)
     replacing = asyncio.create_task(state.replace(forks.new, gate))
     await gate.started.wait()
-    assert state.locked
-    appending = asyncio.create_task(state.append(forks.new_ext[0]))
-    await _spin()
-    assert not appending.done()  # waits for the lock
-    assert _hashes(state.blocks) == _hashes(forks.old)
+    assert not state.locked  # validating does not hold the lock
+    assert await asyncio.wait_for(state.append(forks.old_ext[0]), 1.0) is True
     gate.release.set()
-    assert await replacing is True
-    assert await appending is True  # it extends the NEW tip
+    assert await replacing is False  # stale: the chain changed while it was validated
+    assert _hashes(state.blocks) == _hashes([*forks.old, forks.old_ext[0]])
+    assert _hashes(fx.stored(path)) == _hashes(state.blocks)
+    # retried against the current chain, it is installed, and appends then extend the NEW tip
+    assert await state.replace(forks.new, fx.validator.full) is True
+    assert await state.append(forks.new_ext[0]) is True
     assert _hashes(state.blocks) == _hashes([*forks.new, forks.new_ext[0]])
     assert _hashes(fx.stored(path)) == _hashes(state.blocks)
 
   asyncio.run(scenario())
 
 
-def test_queued_append_for_old_tip_is_rejected_after_replace(fx: Fixture, forks: Forks) -> None:
-  # CN-TC-17.1
+def test_appends_queued_behind_a_replace_install_run_against_the_new_tip(
+  fx: Fixture, forks: Forks
+) -> None:
+  # CN-TC-17.1: the install (save + rebinding) holds the lock; queued appends run afterwards
   async def scenario() -> None:
-    state, _, path, _ = fx.make(forks.old)
-    gate = Gate(fx.validator.full)
-    replacing = asyncio.create_task(state.replace(forks.new, gate))
-    await gate.started.wait()
-    appending = asyncio.create_task(state.append(forks.old_ext[0]))
+    state, store, path, _ = fx.make(forks.old)
+    store.hold = threading.Event()
+    replacing = asyncio.create_task(state.replace(forks.new, fx.validator.full))
+    await _until_set(store.entered)  # the replace is saving, inside the lock
+    assert state.locked
+    old_tip = asyncio.create_task(state.append(forks.old_ext[0]))
+    new_tip = asyncio.create_task(state.append(forks.new_ext[0]))
     await _spin()
-    assert not appending.done()
-    gate.release.set()
+    assert not old_tip.done() and not new_tip.done()  # both wait for the lock
+    assert _hashes(state.blocks) == _hashes(forks.old)  # nothing installed before the save
+    store.hold.set()
     assert await replacing is True
-    assert await appending is False  # no longer extends the tip
-    assert _hashes(state.blocks) == _hashes(forks.new)
-    assert _hashes(fx.stored(path)) == _hashes(forks.new)
+    assert await old_tip is False  # no longer extends the tip
+    assert await new_tip is True  # it extends the NEW tip
+    assert _hashes(state.blocks) == _hashes([*forks.new, forks.new_ext[0]])
+    assert _hashes(fx.stored(path)) == _hashes(state.blocks)
 
   asyncio.run(scenario())
 
 
-def test_sync_validate_runs_in_worker_thread_while_lock_is_held(fx: Fixture, forks: Forks) -> None:
+def test_sync_validate_runs_in_worker_thread_outside_the_lock(fx: Fixture, forks: Forks) -> None:
   # CN-TC-17.1
-  seen: dict[str, int] = {}
+  seen: dict[str, object] = {}
+  holder: list[ChainState] = []
 
   def validate(chain: Sequence[Block]) -> ValidationResult:
     seen["thread"] = threading.get_ident()
+    seen["locked"] = holder[0].locked
     return fx.validator.full(chain)
 
   async def scenario() -> None:
     state, _, _, _ = fx.make(forks.old)
+    holder.append(state)
     main = threading.get_ident()
     assert await state.replace(forks.new, validate) is True
     assert seen["thread"] != main
+    assert seen["locked"] is False
     assert not state.locked
 
   asyncio.run(scenario())
@@ -322,9 +354,11 @@ def _interleaving(fx: Fixture, forks: Forks, seed: int) -> None:
     ]
     replaced = await replace_task
     results = await asyncio.gather(*append_tasks)
-    assert replaced is replace_valid
+    if replace_valid and not replaced:  # stale: only an append on the old chain moves it
+      assert any(ok and b in forks.old_ext for b, ok in zip(appends, results, strict=True))
+    assert replaced is False or replace_valid
     final = state.blocks
-    base, ext = (forks.new, forks.new_ext) if replace_valid else (forks.old, forks.old_ext)
+    base, ext = (forks.new, forks.new_ext) if replaced else (forks.old, forks.old_ext)
     assert _hashes(final[: len(base)]) == _hashes(base)  # wholly one side
     extras = final[len(base) :]
     assert all(b in ext for b in extras)  # nothing from the other branch leaked in
@@ -386,7 +420,7 @@ def test_reader_sees_old_chain_during_replace_and_new_chain_after(
     gate = Gate(fx.validator.full)
     replacing = asyncio.create_task(state.replace(forks.new, gate))
     await gate.started.wait()
-    assert state.locked
+    assert not state.locked  # validation runs outside the lock
     for _ in range(3):
       await asyncio.sleep(0)
       assert state.blocks == before
@@ -417,13 +451,10 @@ def test_invalid_replace_leaves_chain_untouched_and_queued_append_succeeds(
     gate = Gate(fx.validator.full)
     replacing = asyncio.create_task(state.replace(bad, gate))
     await gate.started.wait()
-    appending = asyncio.create_task(state.append(forks.old_ext[0]))
-    await _spin()
-    assert not appending.done()
+    # an append during the (outside-the-lock) validation is processed at once
+    assert await asyncio.wait_for(state.append(forks.old_ext[0]), 1.0) is True
     gate.release.set()
     assert await replacing is False
-    # the queued append was processed against the unchanged chain
-    assert await appending is True
     assert state.blocks == (*blocks_before, forks.old_ext[0])
     assert not state.locked
     assert cache.snapshot.tip_index == len(blocks_before)
@@ -555,33 +586,45 @@ def test_chain_state_has_no_snapshot_api_and_exactly_one_lock(fx: Fixture, forks
 
 
 def test_prefer_runs_under_lock_against_current_chain(fx: Fixture, forks: Forks) -> None:
-  # CN-TC-17.1, CN-TC-17.4
-  seen: list[tuple[int, int]] = []
+  # CN-TC-17.1, CN-TC-17.4: asked once before validating (skip a worse candidate) and again
+  # under the lock against the chain current at install time
+  seen: list[tuple[int, int, bool]] = []
+  holder: list[ChainState] = []
 
   def longer(current: tuple[Block, ...], candidate: tuple[Block, ...]) -> bool:
-    seen.append((len(current), len(candidate)))
+    seen.append((len(current), len(candidate), holder[0].locked))
     return len(candidate) > len(current)
 
   async def scenario() -> None:
     state, _, path, _ = fx.make(forks.old)  # old: len 2, new: len 3
-    # occupy the lock with a replace that gets refused, so appends and a replace queue behind it
-    holder = Gate(lambda chain: ValidationResult(False, 1, "hash"))
-    first = asyncio.create_task(state.replace(forks.new, holder))
-    await holder.started.wait()
-    queued = [asyncio.create_task(state.append(b)) for b in forks.old_ext]  # old grows to len 4
-    waiting = asyncio.create_task(state.replace(forks.new, fx.validator.full, prefer=longer))
-    await _spin()
-    assert not waiting.done()
-    holder.release.set()
-    assert await first is False
-    assert [await t for t in queued] == [True, True]
-    assert await waiting is False  # new (3) is no longer longer than the current chain (4)
-    assert seen == [(4, 3)]
-    assert _hashes(state.blocks) == _hashes([*forks.old, *forks.old_ext])
-    assert _hashes(fx.stored(path)) == _hashes(state.blocks)
-    # the same rule accepts a candidate that is still longer
-    state2, _, _, _ = fx.make(forks.old)
-    assert await state2.replace(forks.new, fx.validator.full, prefer=longer) is True
+    holder.append(state)
+    gate = Gate(fx.validator.full)
+    replacing = asyncio.create_task(state.replace(forks.new, gate, prefer=longer))
+    await gate.started.wait()
+    assert seen == [(2, 3, False)]
+    gate.release.set()
+    assert await replacing is True
+    assert seen == [(2, 3, False), (2, 3, True)]  # re-judged under the lock
+    assert _hashes(fx.stored(path)) == _hashes(forks.new)
+
+    # a rule that no longer holds at install time refuses the candidate, changing nothing
+    state2, _, path2, _ = fx.make(forks.old)
+    answers = iter([True, False])
+    raw, generation = path2.read_bytes(), state2.generation
+    refused = await state2.replace(forks.new, fx.validator.full, prefer=lambda c, n: next(answers))
+    assert refused is False
+    assert state2.blocks == tuple(forks.old) and state2.generation == generation
+    assert path2.read_bytes() == raw
+
+    # a candidate that is not preferred is never even validated
+    calls: list[int] = []
+
+    def counting(chain: Sequence[Block]) -> ValidationResult:
+      calls.append(len(chain))
+      return fx.validator.full(chain)
+
+    assert await state2.replace(forks.new, counting, prefer=lambda c, n: False) is False
+    assert calls == []
 
   asyncio.run(scenario())
 
@@ -854,7 +897,7 @@ def test_pow_persistence_error_does_back_off(fx: Fixture, monkeypatch: pytest.Mo
 # ------------------------------------------------------------ 17.6 through GET /node/info
 
 
-def test_node_info_is_consistent_while_replace_holds_the_lock(fx: Fixture, forks: Forks) -> None:
+def test_node_info_is_consistent_while_a_replace_is_in_progress(fx: Fixture, forks: Forks) -> None:
   # CN-TC-17.6
   from types import SimpleNamespace
 
@@ -875,7 +918,7 @@ def test_node_info_is_consistent_while_replace_holds_the_lock(fx: Fixture, forks
     gate = Gate(context.validator.full)
     replacing = asyncio.create_task(state.replace(forks.new, gate))
     await gate.started.wait()
-    assert state.locked
+    assert not state.locked  # validation runs outside the lock
     for _ in range(3):
       info = await node_info(request)  # type: ignore[arg-type]
       assert info.tip_index == len(forks.old) - 1 == len(state.blocks) - 1
@@ -888,3 +931,39 @@ def test_node_info_is_consistent_while_replace_holds_the_lock(fx: Fixture, forks
     assert info.chain_valid
 
   asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("operation", ["append", "replace"])
+def test_cancelled_caller_whose_save_then_fails_still_sees_the_cancellation(
+  fx: Fixture, forks: Forks, operation: str, caplog: pytest.LogCaptureFixture
+) -> None:
+  # CR4: the cancellation must not be lost when the deferred save raises afterwards
+  async def scenario() -> None:
+    state, store, path, _ = fx.make(forks.old)
+    blocks_before, bytes_before = state.blocks, path.read_bytes()
+    store.hold = threading.Event()
+    if operation == "append":
+      task = asyncio.create_task(state.append(forks.old_ext[0]))
+    else:
+      task = asyncio.create_task(state.replace(forks.new, fx.validator.full))
+    await _until_set(store.entered)  # the save runs in its worker thread
+    task.cancel()
+    await _spin()
+    assert not task.done()  # deferred until the save finished
+    store.fail = OSError("disk full")
+    store.hold.set()
+    with pytest.raises(asyncio.CancelledError) as raised:
+      await task
+    chain, exc = [], raised.value  # the task re-wraps the CancelledError: walk the chain
+    while exc is not None and len(chain) < 5:
+      chain.append(exc)
+      exc = exc.__cause__ or exc.__context__
+    assert any(isinstance(e, OSError) for e in chain)  # chained to the save error
+    assert not state.locked
+    assert state.blocks == blocks_before  # nothing was installed
+    assert path.read_bytes() == bytes_before
+
+  with caplog.at_level(logging.ERROR, logger="node.chain_state"):
+    asyncio.run(scenario())
+  assert "chain save failed while the caller was cancelled" in caplog.text
+  assert "disk full" in caplog.text

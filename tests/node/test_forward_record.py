@@ -1,4 +1,4 @@
-"""Slice 17b: the `forward_record` channel, non-primary -> primary record intake (UC-16).
+"""The `forward_record` channel, non-primary -> primary record intake (UC-16).
 
 QA: CN-TC-16.1 .. 16.23 and 16.25 .. 16.33 (16.24 / 16.34 belong to Slice 31b) plus the
 as-built censorship watch (UC-16-EC6). Cluster tests run four PBFT nodes in one event loop;

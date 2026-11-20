@@ -9,6 +9,7 @@ sync (`node.sync`), which a `needs_sync` verdict triggers on demand.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from blockchain_core import Block
 from blockchain_core.storage.chain_store import block_from_dict, block_to_dict
+from node.netguard import Resolver, check_resolved_async, system_resolve
 from node.network.connection_manager import (
   BLOCKS_PATH,
   MAX_MESSAGE_BYTES,
@@ -63,12 +65,24 @@ class StarletteWs:
 
 
 class WebsocketsConnector:
-  """Outbound dialer over the `websockets` library."""
+  """Outbound dialer over the `websockets` library. Before each dial the host is resolved and
+  refused (`UnsafeAddressError`, an OSError: the dial loop retries with backoff) if it is, or
+  resolves to, a forbidden address (loopback unless `allow_loopback`, link-local, unspecified,
+  multicast, IPv4-compatible, cloud metadata). The lookup is bounded and cached and runs on
+  netguard's dedicated pools (the validator one inside the dial loop of a ValidatorSet member)
+  - see `node.netguard`, which also documents the DNS-rebinding residual."""
+
+  def __init__(self, *, allow_loopback: bool = False, resolve: Resolver = system_resolve) -> None:
+    self._allow_loopback = allow_loopback
+    self._resolve = resolve
 
   async def connect(self, host: str, port: int, path: str) -> Any:
     from websockets.asyncio.client import connect
     from websockets.exceptions import WebSocketException
 
+    await check_resolved_async(
+      host, port, allow_loopback=self._allow_loopback, resolve=self._resolve
+    )
     try:
       raw = await connect(f"ws://{host}:{port}{path}", max_size=MAX_MESSAGE_BYTES, open_timeout=5)
     except (WebSocketException, TimeoutError) as exc:
@@ -136,7 +150,9 @@ class BlockReceiver:
     except Exception:
       self._manager.flag(peer_id, "malformed_block")
       return InboundVerdict("reject", "malformed")
-    verdict = self._gateway.screen(block)
+    # Signature + full extension validation of up to a block's worth of records: CPU-bound, so
+    # it runs in a worker thread instead of stalling the event loop (screen is pure).
+    verdict = await asyncio.to_thread(self._gateway.screen, block)
     if verdict.kind == "duplicate":
       return verdict
     if verdict.kind == "needs_sync":
@@ -170,4 +186,5 @@ async def ws_blocks(websocket: WebSocket) -> None:
   if manager is None or not websocket.app.state.accepting:
     await websocket.close(1013)  # try again later
     return
-  await manager.accept_inbound(StarletteWs(websocket))
+  client = websocket.client
+  await manager.accept_inbound(StarletteWs(websocket), remote=client.host if client else None)

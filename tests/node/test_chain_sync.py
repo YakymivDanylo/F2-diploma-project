@@ -1,4 +1,4 @@
-"""Slice 16b: chain sync - incremental vs full-from-genesis, one validator, failure handling.
+"""Slice 16b: chain sync - extension / common-ancestor paths, one validator, failure handling.
 
 Multi-node cases run in one event loop on the in-memory `Cluster` (mine=False, no peers
 registered: the tests drive `ChainSync.sync_with` themselves).
@@ -66,9 +66,12 @@ def test_strict_extension_is_validated_incrementally(node_env: NodeEnv, ahead: i
       assert await sync_of(n1).sync_with(peer_of(n2)) == "adopted"
 
       assert spy.full_calls == []  # never the full-from-genesis path
-      ((trusted, new_blocks),) = spy.extension_calls
+      *prechecks, (trusted, new_blocks) = spy.extension_calls
       assert trusted.index == 2
       assert [b.index for b in new_blocks] == list(range(3, 3 + ahead))
+      # past the first page, the first new block is pre-checked before the rest is downloaded
+      expected = [] if ahead == 1 else [(chain[2].block_hash, [chain[3].block_hash])]
+      assert [(t.block_hash, [b.block_hash for b in bs]) for t, bs in prechecks] == expected
       requested = cluster.chain_fetcher.requests[before:]
       assert requested[0][1] == 2  # the first request starts at the local tip index
       assert all(from_index >= 2 for _, from_index, _ in requested)  # nothing below the tip
@@ -80,8 +83,10 @@ def test_strict_extension_is_validated_incrementally(node_env: NodeEnv, ahead: i
   run(go())
 
 
-def test_divergent_longer_chain_takes_the_full_from_genesis_path(node_env: NodeEnv) -> None:
-  # CN-TC-3.2 (closes M-14): a fork below the local tip is validated in full, never incrementally
+def test_divergent_longer_chain_is_validated_from_the_common_ancestor(node_env: NodeEnv) -> None:
+  # CN-TC-3.2 (M-14 as amended 2026-11-20): a fork below the local tip is validated from the
+  # last block both chains share - OUR trusted block, never an untrusted base - and the whole
+  # divergent suffix is validated; nothing is fetched from genesis
   genesis = build_genesis_block()
   local = extend(node_env, [genesis], [1, 2])
   theirs = extend(node_env, [genesis], [11, 12, 13, 14])
@@ -96,9 +101,12 @@ def test_divergent_longer_chain_takes_the_full_from_genesis_path(node_env: NodeE
 
       assert await sync_of(n1).sync_with(peer_of(n2)) == "adopted"
 
-      assert spy.extension_calls == []
-      assert spy.full_calls == [tuple(theirs)]  # once, over the WHOLE incoming chain
-      assert 0 in [from_index for _, from_index, _ in cluster.chain_fetcher.requests[before:]]
+      assert spy.full_calls == []
+      ((trusted, suffix),) = spy.extension_calls  # once, over the WHOLE divergent suffix
+      assert trusted.block_hash == genesis.block_hash  # the common ancestor, our own block
+      assert [b.block_hash for b in suffix] == [b.block_hash for b in theirs[1:]]
+      starts = [from_index for _, from_index, _ in cluster.chain_fetcher.requests[before:]]
+      assert starts == [2, 1]  # the probe at our tip, then the page down to the fork point
       assert blocks_of(n1) == tuple(theirs)
       assert cluster.stored_blocks("node1") == theirs
       assert n1.context.validity_cache.snapshot.tip_index == 4
@@ -110,8 +118,9 @@ def test_divergent_longer_chain_takes_the_full_from_genesis_path(node_env: NodeE
   run(go())
 
 
-def test_local_invalid_chain_forces_full_validation(node_env: NodeEnv) -> None:
-  # CN-TC-3.2 (A): an untrusted local tip is never the base of an incremental check
+def test_local_invalid_chain_is_healed_from_its_trusted_prefix(node_env: NodeEnv) -> None:
+  # CN-TC-3.2 (A): an untrusted local block is never the base of an incremental check - the
+  # base is the tip of the valid prefix, and everything after it is validated
   chain = pow_chain(node_env, 4)
 
   async def go() -> None:
@@ -121,12 +130,17 @@ def test_local_invalid_chain_forces_full_validation(node_env: NodeEnv) -> None:
       bad[2] = dataclasses.replace(bad[2], timestamp=bad[2].timestamp + 1)
       await force_install(n1, bad)  # extendable, as far as the state knows ...
       n1.context.chain_state._extendable = False  # ... so mark it invalid like a failed boot
+      n1.context.validity_cache.initialize(bad)  # first_invalid_index = 2
+      assert len(n1.context.chain_state.trusted_blocks) == 2
       await install(n2, chain)
       spy = ValidatorSpy(n1.context.validator)
 
       assert await sync_of(n1).sync_with(peer_of(n2)) == "adopted"
 
-      assert spy.extension_calls == [] and spy.full_calls == [tuple(chain)]
+      assert spy.full_calls == []
+      ((trusted, suffix),) = spy.extension_calls
+      assert trusted.block_hash == chain[1].block_hash  # the trusted tip, not the bad block
+      assert [b.index for b in suffix] == [2, 3, 4]
       assert blocks_of(n1) == tuple(chain) and n1.context.chain_state.extendable
 
   run(go())
@@ -428,8 +442,10 @@ def test_http_fetcher_non_json_and_truncated_bodies_are_malformed(node_env: Node
         server, port = _serve(handler)
         try:
           with pytest.raises(SyncResponseError):
-            await HttpChainFetcher(timeout=2).get_chain_page("127.0.0.1", port, 0, 3)
-          sync, flags = make_sync(n1, HttpChainFetcher(timeout=2))
+            await HttpChainFetcher(timeout=2, allow_loopback=True).get_chain_page(
+              "127.0.0.1", port, 0, 3
+            )
+          sync, flags = make_sync(n1, HttpChainFetcher(timeout=2, allow_loopback=True))
           assert await sync.sync_with(PeerAddress("node2", "127.0.0.1", port)) == "malformed"
           assert flags == [("node2", "malformed chain response")] and len(blocks_of(n1)) == 1
         finally:
@@ -447,14 +463,14 @@ def test_http_fetcher_end_to_end_and_refused_port(node_env: NodeEnv) -> None:  #
       n1 = cluster["node1"]
       server, port = _serve(type("H", (_Handler,), {"blocks": chain}))
       try:
-        sync, _ = make_sync(n1, HttpChainFetcher(timeout=2), page_size=3)
+        sync, _ = make_sync(n1, HttpChainFetcher(timeout=2, allow_loopback=True), page_size=3)
         assert await sync.sync_with(PeerAddress("node2", "127.0.0.1", port)) == "adopted"
         assert blocks_of(n1) == tuple(chain)
       finally:
         server.shutdown()
         server.server_close()
       # the port is closed now: connection refused -> unreachable
-      sync, flags = make_sync(n1, HttpChainFetcher(timeout=2))
+      sync, flags = make_sync(n1, HttpChainFetcher(timeout=2, allow_loopback=True))
       assert await sync.sync_with(PeerAddress("node2", "127.0.0.1", port)) == "unreachable"
       assert flags == []
 
@@ -485,8 +501,8 @@ def test_long_chain_is_caught_up_over_many_pages(node_env: NodeEnv, diverged: bo
 
       starts = [from_index for _, from_index, _ in cluster.chain_fetcher.requests[before:]]
       full_pages = [0, 4, 8, 12, 16, 20, 24]  # 26 blocks, 4 per page
-      if diverged:  # the probe from the local tip, then every page again from genesis
-        assert starts[0] == len(local) - 1 and starts[-7:] == full_pages
+      if diverged:  # the probe at the local tip, the page down to the fork point, the rest
+        assert starts == [2, 1, 6, 10, 14, 18, 22]
       else:
         assert starts == full_pages
       assert blocks_of(n1) == tuple(theirs)
@@ -532,10 +548,19 @@ def test_future_timestamp_cap_applies_to_synced_blocks(
 # --------------------------------------------------------------- stale extension
 
 
-def test_extension_is_not_adopted_if_the_local_chain_moved_meanwhile(node_env: NodeEnv) -> None:
-  # prefer is re-judged under the lock (16a covers the mechanism; this is the sync-level proof)
+@pytest.mark.parametrize("peer_tip", [3, 5], ids=["equal-length", "longer"])
+def test_a_chain_is_rejudged_against_the_local_chain_that_moved_meanwhile(
+  node_env: NodeEnv, peer_tip: int
+) -> None:
+  # prefer is re-judged under the lock against the CURRENT chain (16a covers the mechanism;
+  # this is the sync-level proof): a block appended while we fetched counts
   chain = pow_chain(node_env, 5)
+  theirs = chain[: peer_tip + 1]
   rival = pow_block(node_env, chain[2], 99)  # a different block 3 on our own tip
+  if peer_tip == 3:  # equal length after the append: the lowest tip hash wins
+    expected = "adopted" if int(chain[3].block_hash, 16) < int(rival.block_hash, 16) else None
+  else:
+    expected = "adopted"  # longer than our chain + the append: still the better chain
 
   class AppendsWhileFetching:
     def __init__(self, inner: Any, node: Any) -> None:
@@ -552,13 +577,20 @@ def test_extension_is_not_adopted_if_the_local_chain_moved_meanwhile(node_env: N
     async with _pair(node_env) as cluster:
       n1, n2 = cluster["node1"], cluster["node2"]
       await install(n1, chain[:3])
-      await install(n2, chain)
+      await install(n2, theirs)
       sync, flags = make_sync(n1, AppendsWhileFetching(cluster.chain_fetcher, n1))
 
-      assert await sync.sync_with(peer_of(n2)) == "not_better"
+      outcome = await sync.sync_with(peer_of(n2))
 
-      assert blocks_of(n1) == (*chain[:3], rival)  # the append stands, the stale chain is refused
       assert flags == []  # the peer did nothing wrong
-      assert cluster.stored_blocks("node1") == [*chain[:3], rival]
+      if expected == "adopted":
+        assert outcome == "adopted"
+        assert blocks_of(n1) == tuple(theirs)
+        rival_record = rival.document_records[0].document_hash
+        assert n1.context.mempool.contains(rival_record)  # the dropped append is re-queued
+      else:
+        assert outcome == "not_better"
+        assert blocks_of(n1) == (*chain[:3], rival)  # the append stands
+      assert cluster.stored_blocks("node1") == list(blocks_of(n1))
 
   run(go())

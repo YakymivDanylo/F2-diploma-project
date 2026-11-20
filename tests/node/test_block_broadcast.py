@@ -5,13 +5,15 @@ import logging
 import re
 import socket
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 import uvicorn
-from chain_factory import _record, pow_block
+from chain_factory import _record
+from chain_factory import pow_block as factory_pow_block
 from network_helpers import Cluster, ClusterNode, until
 from node_helpers import NodeEnv, pem_of
 
@@ -59,6 +61,13 @@ def _spy_broadcasts(node: ClusterNode) -> list[dict]:
 
   node.manager.broadcast = spy  # type: ignore[method-assign]
   return sent
+
+
+def pow_block(env: NodeEnv, previous: Block, seed: int, **options: Any) -> Block:
+  """A factory PoW block stamped with the wall clock: the broadcast screen rejects a PoW block
+  older than the skew window (anti back-dating), and the factory's fixed timestamps are."""
+  options.setdefault("timestamp", max(int(time.time() * 1000), previous.timestamp))
+  return factory_pow_block(env, previous, seed, **options)
 
 
 def _genesis(node: ClusterNode) -> Block:
@@ -371,7 +380,8 @@ def test_exactly_one_validation_entry_point() -> None:
 
 def test_no_trusted_peer_shortcut() -> None:
   text = (SRC / "network" / "ws_blocks.py").read_text(encoding="utf-8")
-  assert "self._gateway.screen(block)" in text  # every inbound block is screened
+  # every inbound block is screened (off the event loop)
+  assert "asyncio.to_thread(self._gateway.screen, block)" in text
   assert not re.search(r"\b(trusted|whitelist|skip_validation)\b", text, re.IGNORECASE)
 
 
@@ -392,6 +402,7 @@ def test_blocks_travel_over_real_websockets(node_env: NodeEnv) -> None:
     "CONSENSUS_MODE": "pow",
     "EXPECTED_DIFFICULTY": "1",
     "CHAIN_PATH": str(node_env.root / "real-a.json"),
+    "ALLOW_LOOPBACK_PEERS": "1",  # both real nodes run on 127.0.0.1 (env_b inherits it)
   }
   app_a = create_app(load_config(env_a))  # engine on: it is what adopts peer blocks
   server = uvicorn.Server(uvicorn.Config(app_a, host="127.0.0.1", port=port, log_level="warning"))

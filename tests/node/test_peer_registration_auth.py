@@ -11,11 +11,12 @@ from fastapi.testclient import TestClient
 from node_helpers import NodeEnv, pem_of
 
 from blockchain_core import generate_node_keypair, save_key_pair
-from node.api.peers import PeerOut, validator_registration_error
+from node.api.peers import PeerOut, registration_error
 from node.config import load_config
-from node.main import NodeContext, create_app
+from node.context import NodeContext
+from node.main import create_app
 from node.peers.attestation import check_registration, sign_registration
-from node.peers.registry import PeerRegistry
+from node.peers.registry import PeerInfo, PeerRegistry
 from node.peers.seed_registration import merge_peer_list, register_with_seeds
 
 HOST_A = "host-a.example"
@@ -154,7 +155,7 @@ def test_h4_legit_move_then_old_replay_is_stale_and_retry_is_idempotent(
   node_env: NodeEnv,
 ) -> None:
   now = _now()
-  old = _signed(node_env, host=HOST_A, issued_at=now - 10_000)
+  old = _signed(node_env, host=HOST_A, issued_at=now - 300_000)  # beyond the 60 s skew
   new = _signed(node_env, host=HOST_B, issued_at=now - 5_000)
   with TestClient(_app(node_env)) as client:
     assert client.post("/peers/register", json=old).status_code == 200
@@ -209,22 +210,36 @@ def test_h4_wrong_key_for_a_validator_id_is_still_a_409(node_env: NodeEnv) -> No
 # ---------------------------------------------------------- 7. non-validators
 
 
-def test_h4_non_validator_ids_register_without_signature_and_do_not_change_n_f(
+def _outsider(node_id: str, host: str, port: int) -> dict[str, Any]:
+  """A non-validator registration with proof of possession of a fresh key."""
+  key = generate_node_keypair()
+  pem = pem_of(key)
+  issued_at = _now() - 1000
+  return {
+    "node_id": node_id,
+    "host": host,
+    "port": port,
+    "public_key": pem,
+    "issued_at": issued_at,
+    "signature": sign_registration(key.private_key, node_id, host, port, pem, issued_at),
+  }
+
+
+def test_h4_non_validator_ids_register_with_proof_of_possession_and_do_not_change_n_f(
   node_env: NodeEnv,
 ) -> None:
   app = _app(node_env)
   with TestClient(app) as client:
     before = app.state.context.resolvers.current.known_node_ids
     for i in range(5):
-      body = {
-        "node_id": f"newcomer{i}",
-        "host": f"n{i}.example",
-        "port": 9200 + i,
-        "public_key": pem_of(generate_node_keypair()),
-      }
+      body = _outsider(f"newcomer{i}", f"n{i}.example", 9200 + i)
       assert client.post("/peers/register", json=body).status_code == 200
+    unsigned = _outsider("nosig", "x.example", 9300)
+    del unsigned["signature"], unsigned["issued_at"]
+    response = client.post("/peers/register", json=unsigned)
+    assert response.status_code == 403 and _code(response) == "registration_unauthenticated"
     peers = _peers(client)
-    assert len(peers) == 5 and peers["newcomer0"]["signature"] is None
+    assert len(peers) == 5 and peers["newcomer0"]["signature"]
     after = app.state.context.resolvers.current
     assert after.known_node_ids == before == {"node1", "node2", "node3", "node4"}
     assert after.active_node_ids == before
@@ -259,20 +274,19 @@ def test_h4_register_response_carries_the_nodes_own_signed_entry(node_env: NodeE
 # ------------------------------------------------------------------ 9. gossip
 
 
-def _accept_for(context: NodeContext) -> Callable[[PeerOut], bool]:
-  def accept(entry: PeerOut) -> bool:  # built like main.py's
-    return (
-      validator_registration_error(
-        context,
-        node_id=entry.node_id,
-        host=entry.host,
-        port=entry.port,
-        public_key=entry.public_key,
-        issued_at=entry.issued_at,
-        signature=entry.signature,
-      )
-      is None
+def _accept_for(context: NodeContext) -> Callable[[PeerOut, PeerInfo | None], str | None]:
+  def accept(entry: PeerOut, held: PeerInfo | None) -> str | None:  # like gossip_accept
+    error = registration_error(
+      context,
+      node_id=entry.node_id,
+      host=entry.host,
+      port=entry.port,
+      public_key=entry.public_key,
+      issued_at=entry.issued_at,
+      signature=entry.signature,
+      held=held,
     )
+    return None if error is not None else entry.public_key
 
   return accept
 
@@ -283,17 +297,18 @@ def _gossip_body(node_env: NodeEnv) -> dict[str, Any]:
       _unsigned(node_env, host=HOST_B),  # forged: genuine key, no signature
       {**_signed(node_env, node_id="node3", host=HOST_A), "host": HOST_B},  # signature mismatch
       _signed(node_env, node_id="node4", host=HOST_A),  # genuine
-      {
-        "node_id": "outsider",
-        "host": "o.example",
-        "port": 9300,
+      _outsider("outsider", "o.example", 9300),  # non-validator with proof of possession
+      {  # non-validator without proof of possession: dropped
+        "node_id": "unsigned-outsider",
+        "host": "u.example",
+        "port": 9301,
         "public_key": pem_of(generate_node_keypair()),
       },
     ]
   }
 
 
-def test_h4_gossip_drops_unsigned_validator_entries_but_keeps_signed_and_outsiders(
+def test_h4_gossip_drops_unsigned_entries_but_keeps_signed_validators_and_outsiders(
   node_env: NodeEnv, boot
 ) -> None:
   context = boot(node_env.env)
@@ -312,7 +327,7 @@ def test_h4_gossip_cannot_replace_a_held_address_with_an_older_registration(
   accept = _accept_for(context)
   now = _now()
   newer = _signed(node_env, host=HOST_B, issued_at=now - 1000)
-  older = _signed(node_env, host=HOST_A, issued_at=now - 9000)
+  older = _signed(node_env, host=HOST_A, issued_at=now - 300_000)  # beyond the 60 s skew
   assert merge_peer_list(context.peers, {"peers": [newer]}, PeerOut, accept) == 1
   assert merge_peer_list(context.peers, {"peers": [older]}, PeerOut, accept) == 0
   held = context.peers.get("node2")
@@ -338,6 +353,7 @@ def test_h4_register_with_seeds_passes_accept_through(node_env: NodeEnv, boot) -
       FakeTransport(),
       PeerOut,
       accept=_accept_for(context),
+      rounds=1,
     )
   )
   assert posted[0][0] == "http://seed.example:8000/peers/register"

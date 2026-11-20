@@ -22,18 +22,33 @@ from typing import Literal
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from .block import Block, CommitSignature, commit_payload
+from .block import MAX_BLOCK_RECORDS, Block, CommitSignature, commit_payload
 from .canonical import CanonicalizationError
 from .document_record import DocumentRecord, verify_document_record
 from .genesis import GENESIS_BLOCK_HASH, build_genesis_block
-from .hashing import sha256_of_canonical
+from .hashing import HEX64_RE, sha256_of_canonical
 from .keys import KeyResolver, PublicKey
 from .merkle import EmptyBatchError, build_root
 from .signing import verify_canonical
 
-FailureType = Literal["hash", "link", "merkle", "signature", "structural", "difficulty", "quorum"]
+FailureType = Literal[
+  "hash",
+  "link",
+  "merkle",
+  "signature",
+  "structural",
+  "difficulty",
+  "quorum",
+  "duplicate_document",
+  "timestamp_in_future",
+]
+"""Why a block failed. The last two are node-layer policy reasons (a `document_hash`
+already anchored in an earlier block, a block timestamp ahead of the wall clock): they
+are part of the type so the node can report them in a `ValidationResult`, but the core
+checklist here never returns them itself."""
 
 __all__ = [
+  "MAX_BLOCK_RECORDS",
   "MAX_DIFFICULTY",
   "MIN_DIFFICULTY",
   "FailureType",
@@ -162,6 +177,23 @@ def _genesis_matches_constants(block: object) -> bool:
   )
 
 
+def _record_well_formed(record: object) -> bool:
+  """Field shapes of one record - a non-canonical (e.g. upper-case) `document_hash` would
+  otherwise slip past cross-block uniqueness, which compares the strings."""
+  return (
+    isinstance(record, DocumentRecord)
+    and isinstance(record.document_hash, str)
+    and HEX64_RE.fullmatch(record.document_hash) is not None
+    and isinstance(record.issuer_id, str)
+    and bool(record.issuer_id)
+    and type(record.issued_at) is int
+    and record.issued_at >= 0
+    and isinstance(record.metadata, Mapping)
+    and (record.ipfs_cid is None or isinstance(record.ipfs_cid, str))
+    and (record.signature is None or isinstance(record.signature, str))
+  )
+
+
 def _well_formed(block: object) -> bool:
   """Type-level shape only; value mismatches are reported by the specific checks below."""
   return (
@@ -175,7 +207,8 @@ def _well_formed(block: object) -> bool:
     and block.algorithm in ("pow", "pbft")
     and isinstance(block.sealed_consensus, Mapping)
     and isinstance(block.document_records, tuple)
-    and all(isinstance(record, DocumentRecord) for record in block.document_records)
+    and len(block.document_records) <= MAX_BLOCK_RECORDS
+    and all(_record_well_formed(record) for record in block.document_records)
     and isinstance(block.commit_signatures, tuple)
     and all(_commit_well_formed(commit) for commit in block.commit_signatures)
   )
@@ -289,6 +322,17 @@ def _quorum_ok(
   # rejected outright, which also bounds the verification work an attacker can force.
   if len(block.commit_signatures) > len(validator_set.members):
     return False
+  # Quorum intersection assumes at most `n` identities can vote at any one time. If more
+  # members hold a key in force at this timestamp (e.g. a validator replaced by a new id
+  # while the old key's retirement is still in the future), two quorums might share no
+  # honest node - so the configuration is treated as unsafe and the block fails closed.
+  active = sum(
+    1
+    for member in validator_set.members
+    if _resolve(resolve_node_key, member, block.timestamp) is not None
+  )
+  if active > validator_set.n:
+    return False
   signers = _distinct_commit_signers(block, validator_set, resolve_node_key)
   return len(signers) >= validator_set.quorum
 
@@ -313,22 +357,24 @@ def _validate_block(
     return "hash", ""
   if block.previous_hash != previous_hash:
     return "link", recomputed
-  # Proof of work first: one integer comparison filters unmined blocks before any
-  # Merkle hashing or signature verification is spent on them.
+  # Consensus first: proof of work is one integer comparison, and the PBFT quorum depends
+  # only on `block_hash` and `commit_signatures` (at most one verification per member).
+  # Both filter a block no honest majority produced before any Merkle hashing or
+  # per-record signature verification (up to MAX_BLOCK_RECORDS of them) is spent on it.
   if block.algorithm == "pow" and not _pow_ok(block, expected_difficulty):
     return "difficulty", recomputed
-  if not _merkle_ok(block):
-    return "merkle", recomputed
-  if not _signatures_ok(block, resolve_node_key, resolve_issuer_key):
-    return "signature", recomputed
-  if not _structure_ok(block, previous):
-    return "structural", recomputed
   if (
     check_quorum
     and block.algorithm == "pbft"
     and not _quorum_ok(block, validator_set, resolve_node_key)
   ):
     return "quorum", recomputed
+  if not _merkle_ok(block):
+    return "merkle", recomputed
+  if not _signatures_ok(block, resolve_node_key, resolve_issuer_key):
+    return "signature", recomputed
+  if not _structure_ok(block, previous):
+    return "structural", recomputed
   return None, recomputed
 
 
@@ -369,16 +415,26 @@ def validate_chain(
 ) -> ValidationResult:
   """Validate `blocks` front to back and report the earliest failing block.
 
-  Per non-genesis block, in order: `"hash"`, `"link"`, `"difficulty"` (PoW only),
-  `"merkle"`, `"signature"` (proposer and every document record), `"structural"`
-  (index, timestamp, duplicate `document_hash` within the block), `"quorum"` (PBFT only):
+  Per non-genesis block, in order: `"structural"` (field types and shapes, at most
+  `MAX_BLOCK_RECORDS` records), `"hash"`, `"link"`, `"difficulty"` (PoW only),
+  `"quorum"` (PBFT only), `"merkle"`, `"signature"` (proposer and every document
+  record), `"structural"` (index, timestamp, duplicate `document_hash` within the
+  block). A block with several defects reports the first in this order:
 
   - `"pow"`: `sealed_consensus["difficulty"]` must equal `expected_difficulty` and
     `block_hash` must be numerically below `pow_target(difficulty)`. Checked right after
     the hash chain because it costs one comparison.
-  - `"pbft"`: the proposer must be a member, and `commit_signatures` must hold valid
-    votes over `commit_payload(block_hash)` from at least `validator_set.quorum`
-    distinct members, keys resolved at `block.timestamp`; a repeated vote counts once.
+  - `"pbft"`: the proposer must be a member, at most `validator_set.n` members may have
+    a key in force at `block.timestamp` (more breaks quorum intersection, so it fails
+    closed), and `commit_signatures` must hold valid votes over
+    `commit_payload(block_hash)` from at least `validator_set.quorum` distinct members,
+    keys resolved at `block.timestamp`; a repeated vote counts once. Checked before the
+    Merkle root and record signatures because it depends only on `block_hash` and the
+    votes, so a block without a quorum never costs per-record verification.
+
+  Record shapes (`"structural"`): `document_hash` 64 lowercase hex characters,
+  `issuer_id` a non-empty string, `issued_at` a non-negative int (not bool), `metadata`
+  a mapping, `ipfs_cid` and `signature` a string or None.
 
   A PoW block validated without `expected_difficulty`, or a PBFT block without
   `validator_set`, fails closed with that failure type - omitting a parameter never
@@ -396,7 +452,9 @@ def validate_chain(
   `validator_set`, or both of them at once.
 
   Not checked here (node-layer policy, Epic 3): `document_hash` uniqueness across
-  blocks, and bounding `timestamp` against wall-clock time or key-revocation times.
+  blocks, and bounding `timestamp` against wall-clock time or key-revocation times. The
+  node reports those as `"duplicate_document"` / `"timestamp_in_future"`; this function
+  never returns either.
   """
   if not blocks:
     raise InvalidChainInputError("cannot validate a chain of zero blocks")
@@ -457,7 +515,8 @@ def validate_candidate(
   """Validate a PBFT candidate (pre-prepare) on top of an already-validated `trusted_tip`.
 
   The identical per-block checklist as `validate_extension`, with only the commit-quorum
-  step skipped - the votes cannot exist before the round runs. Instead, the candidate must
+  step skipped (including the active-key count) - the votes cannot exist before the round
+  runs. Instead, the candidate must
   carry no `commit_signatures` and be proposed by a ValidatorSet member (`"quorum"` if not).
   """
   _check_parameters(None, validator_set)

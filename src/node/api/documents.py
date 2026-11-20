@@ -7,18 +7,22 @@ through the RecordForwarder and maps the reply to HTTP. The proposer never re-si
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Path, Request
-from pydantic import BaseModel, ConfigDict
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from blockchain_core import build_proof, create_document_record
 from blockchain_core.storage.chain_store import block_to_dict
+from node.admission import is_known, mempool_full
 from node.errors import ApiError
 from node.forwarding import ForwardProtocolError, ForwardTimeout, ForwardUnavailable
-from node.schemas import HASH_PATTERN, Hash64, validate_metadata_size
+from node.patterns import HASH_PATTERN
+from node.schemas import Hash64, validate_metadata_size
 
 logger = logging.getLogger("node.documents")
 router = APIRouter()
@@ -86,8 +90,70 @@ def _error_for(code: str) -> ApiError | None:
   return ApiError(error.status_code, error.code, error.message, headers=error.headers)
 
 
-@router.post("/documents", status_code=202, response_model=SubmitAck)
-async def submit_document(body: SubmitRequest, request: Request) -> SubmitAck:
+class _DuplicateKeyError(ValueError):
+  pass
+
+
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+  result: dict[str, Any] = {}
+  for key, value in pairs:
+    if key in result:  # last-wins would sign a value the client may not have meant
+      raise _DuplicateKeyError(key)
+    result[key] = value
+  return result
+
+
+def _body_error(error_type: str, message: str, loc: tuple[Any, ...] = ("body",)) -> Exception:
+  return RequestValidationError([{"loc": loc, "msg": message, "type": error_type}])
+
+
+def _is_json(content_type: str | None) -> bool:
+  if content_type is None:
+    return True  # like FastAPI: no header, try JSON
+  media = content_type.split(";", 1)[0].strip().lower()
+  main, _, sub = media.partition("/")
+  return main == "application" and (sub == "json" or sub.endswith("+json"))
+
+
+def parse_submit_body(raw: bytes, content_type: str | None) -> SubmitRequest:
+  """Strict JSON: duplicate keys and nesting the decoder cannot handle are 422, never a
+  silent last-wins value or a 500. The error shape matches FastAPI's body validation."""
+  if not raw:
+    raise _body_error("missing", "Field required")
+  if not _is_json(content_type):
+    raise _body_error("model_attributes_type", "Input should be a valid JSON object")
+  try:
+    data = json.loads(raw, object_pairs_hook=_unique_keys)
+  except _DuplicateKeyError as exc:
+    raise _body_error("duplicate_key", f"duplicate JSON key {exc.args[0]!r}") from None
+  except RecursionError:
+    raise _body_error("json_too_deep", "JSON is nested too deeply") from None
+  except (ValueError, UnicodeDecodeError) as exc:
+    raise _body_error("json_invalid", f"JSON decode error: {type(exc).__name__}") from None
+  try:
+    return SubmitRequest.model_validate(data)
+  except ValidationError as exc:
+    errors = [
+      {"loc": ("body", *e["loc"]), "msg": e["msg"], "type": e["type"]} for e in exc.errors()
+    ]
+    raise RequestValidationError(errors) from None
+  except RecursionError:
+    raise _body_error("json_too_deep", "JSON is nested too deeply") from None
+
+
+_SUBMIT_BODY_SCHEMA = {
+  "requestBody": {
+    "required": True,
+    "content": {"application/json": {"schema": SubmitRequest.model_json_schema()}},
+  }
+}
+
+
+@router.post(
+  "/documents", status_code=202, response_model=SubmitAck, openapi_extra=_SUBMIT_BODY_SCHEMA
+)
+async def submit_document(request: Request) -> SubmitAck:
+  body = parse_submit_body(await request.body(), request.headers.get("content-type"))
   context = request.app.state.context
   if not request.app.state.accepting:
     raise _retryable("not_ready", "the node is starting up or shutting down")
@@ -110,13 +176,9 @@ async def submit_document(body: SubmitRequest, request: Request) -> SubmitAck:
   # Check -> sign -> queue is one critical section with no await inside, and the lock is
   # always released before awaiting the primary, so a slow forward never blocks others.
   async with context.submission_lock:
-    if (
-      context.chain_state.has_document(document_hash)
-      or context.mempool.contains(document_hash)
-      or document_hash in context.inflight
-    ):
+    if is_known(context, document_hash):
       raise _duplicate()
-    if len(context.mempool) + len(context.inflight) >= context.config.mempool_max_size:
+    if mempool_full(context):
       raise _retryable("mempool_full", "too many pending records, retry shortly")
     record = create_document_record(
       document_hash=document_hash,

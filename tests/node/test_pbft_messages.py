@@ -39,7 +39,7 @@ from node.consensus.pbft.messages import (
   decode_message,
   verify_message,
 )
-from node.main import NodeContext
+from node.context import NodeContext
 from node.network.ws_pbft import PbftReceiver, is_pbft_message
 
 HASH = "ab" * 32

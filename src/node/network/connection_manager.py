@@ -20,8 +20,8 @@ import logging
 import re
 import secrets
 import time
-from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable
+from collections import Counter, OrderedDict
+from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -31,6 +31,8 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from blockchain_core import canonicalize, sign_canonical, verify_canonical
 from blockchain_core.keys import PrivateKey, PublicKey
+from node.netguard import prioritized
+from node.patterns import HASH_RE, NODE_ID_RE
 
 logger = logging.getLogger("node.network")
 
@@ -38,11 +40,24 @@ HELLO_DOMAIN = "node/ws-hello/v2"  # its own domain: a hello proof can never be 
 BLOCKS_PATH = "/ws/blocks"
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 MAX_HANDSHAKE_BYTES = 1024  # hello / proof are tiny; bigger is hostile
-MAX_CONCURRENT_HANDSHAKES = 32
+# Unauthenticated sockets: each one can push a frame of up to uvicorn's ws_max_size
+# (SERVER_WS_MAX_SIZE, 8 MiB) before our MAX_HANDSHAKE_BYTES check sees it, so this bound sets
+# the memory strangers can pin: 8 x 8 MiB = 64 MiB (it was 256 MiB at 32).
+MAX_CONCURRENT_HANDSHAKES = 8
+MAX_HANDSHAKES_PER_ADDRESS = 2  # one remote host cannot hold every handshake slot (slowloris)
+# Authenticated PeerInfo-only peers: a bounded number of inbound links. Small on purpose: the
+# ASGI server (uvicorn `--ws-max-size` = SERVER_WS_MAX_SIZE, 8 MiB) buffers a whole frame
+# BEFORE our NON_VALIDATOR_MAX_FRAME (64 KiB) check sees it, so the memory non-validators can
+# pin is MAX_NON_VALIDATOR_LINKS x 8 MiB (= 64 MiB at 8 links, it was 256 MiB at 32).
+MAX_NON_VALIDATOR_LINKS = 8
+NON_VALIDATOR_MAX_FRAME = 64 * 1024  # PeerInfo-only peers never need validator-sized frames
+DEFAULT_HANDSHAKE_TIMEOUT = 2.0  # a silent socket gives its slot back quickly
+# The ASGI server's own frame limit (uvicorn `--ws-max-size`): without it a handshake frame
+# could be 16 MB (uvicorn's default) before any of our checks run.
+SERVER_WS_MAX_SIZE = MAX_MESSAGE_BYTES
 AUTH_FAILED_CLOSE_CODE = 4401
-_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
-_EPH_RE = re.compile(r"^[0-9a-f]{64}$")
+MAX_FLAGGED_IDS = 1024  # flag counters kept (LRU); ValidatorSet members are never evicted
 UNAUTHENTICATED_KEY = "#unauthenticated"  # not a valid node_id, so it can never be spoofed
 
 STATUS_UP = "up"
@@ -210,11 +225,11 @@ async def authenticate(
       if (
         hello.get("type") != "hello"
         or not isinstance(their_id, str)
-        or not _ID_RE.fullmatch(their_id)
+        or not NODE_ID_RE.fullmatch(their_id)
         or not isinstance(their_nonce, str)
         or not _NONCE_RE.fullmatch(their_nonce)
         or not isinstance(their_eph, str)
-        or not _EPH_RE.fullmatch(their_eph)
+        or not HASH_RE.fullmatch(their_eph)  # X25519 key: 64 lowercase hex, a hash's shape
       ):
         raise AuthFailed("malformed hello")
       if their_id == my_id:
@@ -279,7 +294,7 @@ class PeerConnectionManager:
     base_delay: float = 0.5,
     max_delay: float = 30.0,
     scan_interval: float = 2.0,
-    handshake_timeout: float = 5.0,
+    handshake_timeout: float = DEFAULT_HANDSHAKE_TIMEOUT,
     send_timeout: float = 5.0,
     down_after: int = 5,
     max_dialed: int = 64,
@@ -300,10 +315,13 @@ class PeerConnectionManager:
     self._max_dialed = max_dialed
     self._links: dict[str, _Link] = {}
     self._dialers: dict[str, asyncio.Task[None]] = {}
+    # cancelled dial loops still winding down, by peer: no new loop starts for that id meanwhile
+    self._retired: dict[str, asyncio.Task[None]] = {}
     self._readers: set[asyncio.Task[None]] = set()
     self._scanner: asyncio.Task[None] | None = None
-    self._flags: Counter[str] = Counter()
+    self._flags: OrderedDict[str, int] = OrderedDict()  # LRU, bounded by MAX_FLAGGED_IDS
     self._handshakes = 0
+    self._handshakes_by_address: Counter[str] = Counter()
     self.dial_delays: list[float] = []  # recent backoff delays, for observability and tests
 
   # ---------------------------------------------------------------- lifecycle
@@ -314,7 +332,7 @@ class PeerConnectionManager:
       self._scanner = asyncio.create_task(self._scan_loop(), name="peer-scanner")
 
   async def stop(self) -> None:
-    tasks = [*self._dialers.values(), *self._readers]
+    tasks = [*self._dialers.values(), *self._retired.values(), *self._readers]
     if self._scanner is not None:
       tasks.append(self._scanner)
     self._scanner = None
@@ -332,17 +350,58 @@ class PeerConnectionManager:
   # ------------------------------------------------------------------ dialing
 
   def _scan(self) -> None:
-    # ValidatorSet members first, then other peers, at most `max_dialed` outbound dial loops:
-    # registering thousands of PeerInfo entries must not make us open thousands of sockets.
-    validators = set(self._known_ids())
-    ordered = sorted(self._addresses(), key=lambda node_id: node_id not in validators)
+    # Every ValidatorSet member with an address is always dialed and never counts toward
+    # `max_dialed`; other peers share at most `max_dialed` outbound dial loops: registering
+    # thousands of PeerInfo entries must not make us open thousands of sockets, and identities
+    # that registered early must not hold the slots a validator learned later needs. A dial
+    # loop whose peer is no longer listed (evicted from PeerInfo) and is no validator ends,
+    # closing its link, so its slot is freed for a peer that is still listed. A link that is
+    # down, unlisted, no validator's and dialed by no loop is forgotten, so neither `_links`
+    # nor `health()` (GET /node/info) grows with every id that ever connected.
+    validators = self._validator_ids()
+    addresses = self._addresses()
+    for node_id in [n for n in self._dialers if n not in addresses and n not in validators]:
+      task = self._dialers.pop(node_id)
+      if not task.done():
+        logger.info("stopped dialing %s: no longer a listed peer", node_id)
+        task.cancel()
+        self._retired[node_id] = task
+        task.add_done_callback(lambda done, peer=node_id: self._forget_retired(peer, done))
+    for node_id in [n for n, task in self._dialers.items() if task.done()]:
+      del self._dialers[node_id]
+    for node_id in [
+      n
+      for n, link in self._links.items()
+      if not link.connected
+      and n not in addresses
+      and n not in validators
+      and n not in self._dialers
+      and n not in self._retired
+    ]:
+      del self._links[node_id]
+    extras = sum(1 for n in self._dialers if n not in validators)
+    ordered = sorted(addresses, key=lambda node_id: (node_id not in validators, node_id))
     for node_id in ordered:
-      task = self._dialers.get(node_id)
-      active = sum(1 for t in self._dialers.values() if not t.done())
-      if node_id != self._self_id and (task is None or task.done()) and active < self._max_dialed:
-        self._dialers[node_id] = asyncio.create_task(
-          self._dial_loop(node_id), name=f"dial-{node_id}"
-        )
+      if node_id == self._self_id or node_id in self._dialers or node_id in self._retired:
+        continue  # a retired loop still winding down would share (and clear) the new link
+      if node_id not in validators:
+        if extras >= self._max_dialed:
+          continue
+        extras += 1
+      self._dialers[node_id] = asyncio.create_task(self._dial_loop(node_id), name=f"dial-{node_id}")
+
+  def _forget_retired(self, node_id: str, task: asyncio.Task[None]) -> None:
+    if self._retired.get(node_id) is task:
+      del self._retired[node_id]
+
+  def dialing(self) -> frozenset[str]:
+    """The ids that have a live (not finished) outbound dial loop."""
+    return frozenset(n for n, task in self._dialers.items() if not task.done())
+
+  @property
+  def handshakes_in_progress(self) -> int:
+    """Inbound handshakes currently holding a slot (at most MAX_CONCURRENT_HANDSHAKES)."""
+    return self._handshakes
 
   async def _scan_loop(self) -> None:
     while True:
@@ -367,7 +426,9 @@ class PeerConnectionManager:
       try:
         if address is None:
           raise OSError("no known address")
-        ws = await self._connector.connect(address[0], address[1], BLOCKS_PATH)
+        # a validator's lookup runs on the reserved resolver pool (`node.netguard`)
+        with prioritized(self._is_validator(node_id)):
+          ws = await self._connector.connect(address[0], address[1], BLOCKS_PATH)
         _, ws = await authenticate(
           ws,
           my_id=self._self_id,
@@ -379,9 +440,10 @@ class PeerConnectionManager:
       except (OSError, ConnectionClosed, AuthFailed, TimeoutError) as exc:
         link.failures += 1
         logger.info("dial %s failed (%s), attempt %d", node_id, type(exc).__name__, link.failures)
-        if ws is not None:
-          with contextlib.suppress(Exception):
-            await ws.close()
+        await _close_quietly(ws)
+      except BaseException:  # cancelled (evicted / stopping) mid-handshake: do not leak the socket
+        await _close_quietly(ws)
+        raise
       else:
         link.outbound, link.failures, attempt = ws, 0, 0
         try:
@@ -398,13 +460,23 @@ class PeerConnectionManager:
 
   # ---------------------------------------------------------------- inbound
 
-  async def accept_inbound(self, ws: WsLike) -> None:
-    """Serve one inbound connection until it closes. Unauthenticated peers get closed."""
+  async def accept_inbound(self, ws: WsLike, remote: str | None = None) -> None:
+    """Serve one inbound connection until it closes. Unauthenticated peers get closed.
+
+    `remote` is the connecting host (None when the transport cannot tell); it bounds how many
+    handshake slots a single address may hold at once."""
+    if remote is not None and self._handshakes_by_address[remote] >= MAX_HANDSHAKES_PER_ADDRESS:
+      self._count_flag(UNAUTHENTICATED_KEY)
+      with contextlib.suppress(Exception):
+        await ws.close(1013)
+      return
     if self._handshakes >= MAX_CONCURRENT_HANDSHAKES:  # unauthenticated sockets are capped
       with contextlib.suppress(Exception):
         await ws.close(1013)
       return
     self._handshakes += 1
+    if remote is not None:
+      self._handshakes_by_address[remote] += 1
     try:
       peer_id, secure = await authenticate(
         ws,
@@ -415,12 +487,24 @@ class PeerConnectionManager:
       )
     except AuthFailed as exc:
       logger.warning("rejected inbound connection: %s", exc)
-      self._flags[UNAUTHENTICATED_KEY] += 1
+      self._count_flag(UNAUTHENTICATED_KEY)
       with contextlib.suppress(Exception):
         await ws.close(AUTH_FAILED_CLOSE_CODE)
       return
+    except BaseException:  # cancelled / timed out / closed mid-handshake: never leak the socket
+      await _close_quietly(ws)
+      raise
     finally:
       self._handshakes -= 1
+      if remote is not None:
+        self._handshakes_by_address[remote] -= 1
+        if self._handshakes_by_address[remote] <= 0:
+          del self._handshakes_by_address[remote]
+    if not self._is_validator(peer_id) and not self._non_validator_slot_free(peer_id):
+      logger.info("refused link from non-validator %s: too many non-validator links", peer_id)
+      with contextlib.suppress(Exception):
+        await secure.close(1013)
+      return
     ws = secure
     link = self._link(peer_id)
     previous, link.inbound = link.inbound, ws
@@ -435,6 +519,25 @@ class PeerConnectionManager:
       with contextlib.suppress(Exception):
         await ws.close()
 
+  def _validator_ids(self) -> Collection[str]:
+    ids = self._known_ids()
+    return ids if isinstance(ids, Collection) else frozenset(ids)
+
+  def _is_validator(self, peer_id: str) -> bool:
+    return peer_id in self._validator_ids()  # membership on the collection: no copy per frame
+
+  def _non_validator_slot_free(self, peer_id: str) -> bool:
+    """A non-validator may open a link while fewer than MAX_NON_VALIDATOR_LINKS non-validators
+    hold an inbound one (a peer replacing its own link does not need a new slot)."""
+    existing = self._links.get(peer_id)
+    if existing is not None and existing.inbound is not None:
+      return True
+    validators = self._validator_ids()
+    held = sum(
+      1 for pid, link in self._links.items() if link.inbound is not None and pid not in validators
+    )
+    return held < MAX_NON_VALIDATOR_LINKS
+
   async def _read_loop(self, peer_id: str, ws: WsLike) -> None:
     task = asyncio.current_task()
     if task is not None:
@@ -445,6 +548,11 @@ class PeerConnectionManager:
           raw = await ws.receive_text()
         except ConnectionClosed:
           return
+        # Size is judged before parsing; validator status is re-read per frame, since the
+        # ValidatorSet can change while a link stays open.
+        if len(raw) > NON_VALIDATOR_MAX_FRAME and not self._is_validator(peer_id):
+          self.flag(peer_id, "oversized_frame")
+          continue
         try:
           message = parse_message(raw)
         except ValueError:
@@ -512,10 +620,23 @@ class PeerConnectionManager:
 
   def flag(self, peer_id: str, reason: str) -> None:
     """Record that `peer_id` sent something invalid (feeds Epic 5 analysis)."""
-    self._flags[peer_id] += 1
-    count = self._flags[peer_id]
+    count = self._count_flag(peer_id)
     if count <= 5 or count % 100 == 0:  # a flood of bad messages must not flood the log
       logger.warning("flagged peer %s (%d): %s", peer_id, count, reason)
+
+  def _count_flag(self, key: str) -> int:
+    """Bump `key`'s counter; past MAX_FLAGGED_IDS ids the least recently flagged one is
+    dropped - never a ValidatorSet member, nor the unauthenticated aggregate."""
+    count = self._flags.get(key, 0) + 1
+    self._flags[key] = count
+    self._flags.move_to_end(key)
+    if len(self._flags) > MAX_FLAGGED_IDS:
+      validators = self._validator_ids()
+      for candidate in self._flags:
+        if candidate not in validators and candidate not in (UNAUTHENTICATED_KEY, key):
+          del self._flags[candidate]
+          break
+    return count
 
   @property
   def flags(self) -> dict[str, int]:
@@ -523,6 +644,16 @@ class PeerConnectionManager:
 
   def connected_ids(self) -> list[str]:
     return sorted(pid for pid, link in self._links.items() if link.connected)
+
+
+async def _close_quietly(ws: WsLike | None) -> None:
+  """Close a socket we are giving up on; never raises, and never waits more than a second
+  (also safe inside a task that is being cancelled)."""
+  if ws is None:
+    return
+  with contextlib.suppress(Exception):
+    async with asyncio.timeout(1.0):
+      await ws.close()
 
 
 def now_ms() -> int:

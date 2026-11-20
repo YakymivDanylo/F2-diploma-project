@@ -77,6 +77,7 @@ def make_sync(
   sleep: Callable[[float], Any] | None = None,
   expected_difficulty: int | None = None,
   is_validator: Callable[[str], bool] | None = None,
+  clock: Callable[[], float] | None = None,
 ) -> tuple[ChainSync, list[tuple[str, str]]]:
   """A `ChainSync` over the node's real state/validator/gateway but a scripted fetcher."""
   context = node.context
@@ -84,6 +85,8 @@ def make_sync(
   extra: dict[str, Any] = {} if sleep is None else {"sleep": sleep}
   if is_validator is not None:
     extra["is_validator"] = is_validator
+  if clock is not None:
+    extra["clock"] = clock
   sync = ChainSync(
     state=context.chain_state,
     validator=context.validator,

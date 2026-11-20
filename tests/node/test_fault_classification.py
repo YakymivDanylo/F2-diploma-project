@@ -8,6 +8,7 @@ a finalized height), TC-12.5 (`/node/info` while a view change is open).
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import replace
 from typing import Any
 
@@ -39,6 +40,8 @@ from node.consensus.pbft.messages import (
 from node.validity_cache import (
   LIVENESS_STATES,
   MAX_BYZANTINE_EVENTS,
+  MAX_EVENTS_PER_OFFENDER,
+  MAX_OFFENDERS,
   QUORUM_BYZANTINE,
   QUORUM_CRASH_LOSS,
   QUORUM_HEALTHY,
@@ -357,10 +360,11 @@ def test_pow_same_proposer_conflict_is_not_a_byzantine_event(node_env: NodeEnv) 
     async with _cluster(node_env, ("node1", "node2"), mode="pow") as c:
       node = c["node2"]
       genesis = node.context.current_blocks()[0]
-      first = pow_block(node_env, genesis, 1)
+      now = max(int(time.time() * 1000), genesis.timestamp)  # PoW blocks must not be old
+      first = pow_block(node_env, genesis, 1, timestamp=now)
       assert (await node.receiver.handle_block("node1", block_to_dict(first))).accepted
       verdict = await node.receiver.handle_block(
-        "node1", block_to_dict(pow_block(node_env, genesis, 2))
+        "node1", block_to_dict(pow_block(node_env, genesis, 2, timestamp=now))
       )
       assert verdict.reason == "conflict" and verdict.equivocation
       await asyncio.sleep(0.2)
@@ -439,13 +443,52 @@ def test_validity_cache_liveness_and_byzantine_precedence(node_env: NodeEnv, boo
   assert len(cache.byzantine_events) == 1
 
 
-def test_byzantine_event_log_is_bounded_and_keeps_the_latest(node_env: NodeEnv, boot) -> None:
+def test_byzantine_event_log_is_bounded_per_offender(node_env: NodeEnv, boot) -> None:
   cache = boot(node_env.env).validity_cache
   for i in range(MAX_BYZANTINE_EVENTS + 8):
     cache.flag_byzantine_event(f"event {i}", offender="node3")
   reasons = [e["reason"] for e in cache.byzantine_events]
-  assert len(reasons) == MAX_BYZANTINE_EVENTS
-  assert reasons[-1] == f"event {MAX_BYZANTINE_EVENTS + 7}" and reasons[0] == "event 8"
+  assert len(reasons) == MAX_EVENTS_PER_OFFENDER
+  last = MAX_BYZANTINE_EVENTS + 7
+  # the first event is kept for good; newer ones replace the oldest non-first ones
+  assert reasons == ["event 0", f"event {last - 2}", f"event {last - 1}", f"event {last}"]
+
+
+def test_one_offender_flooding_fresh_slots_cannot_evict_other_evidence(
+  node_env: NodeEnv, boot
+) -> None:
+  # N6: a Byzantine member signing conflicts in fresh (view, seq) slots makes a distinct event
+  # each time; the evidence against other offenders must survive it
+  cache = boot(node_env.env).validity_cache
+  cache.flag_byzantine_event("node4 equivocated at (0, 1)", offender="node4", at_ms=1)
+  cache.flag_byzantine_event("peer diverged at height 2", offender=None, at_ms=2)
+  for seq in range(200):
+    cache.flag_byzantine_event(f"node3 equivocated at (0, {seq})", offender="node3", at_ms=10 + seq)
+  events = cache.byzantine_events
+  assert events[0] == {"reason": "node4 equivocated at (0, 1)", "offender": "node4", "at_ms": 1}
+  assert events[1] == {"reason": "peer diverged at height 2", "offender": None, "at_ms": 2}
+  node3 = [e["reason"] for e in events if e["offender"] == "node3"]
+  assert node3 == [
+    "node3 equivocated at (0, 0)",  # its first event, kept
+    "node3 equivocated at (0, 197)",
+    "node3 equivocated at (0, 198)",
+    "node3 equivocated at (0, 199)",
+  ]
+  assert [e["at_ms"] for e in events] == sorted(e["at_ms"] for e in events)  # chronological
+
+
+def test_byzantine_event_log_is_bounded_overall(node_env: NodeEnv, boot) -> None:
+  cache = boot(node_env.env).validity_cache
+  for who in range(MAX_OFFENDERS + 5):
+    for i in range(MAX_EVENTS_PER_OFFENDER + 2):
+      cache.flag_byzantine_event(f"e{i}", offender=f"o{who}", at_ms=i)
+  events = cache.byzantine_events
+  assert len(events) == MAX_BYZANTINE_EVENTS == MAX_OFFENDERS * MAX_EVENTS_PER_OFFENDER
+  assert len({e["offender"] for e in events}) == MAX_OFFENDERS
+  assert all(e["offender"] != f"o{MAX_OFFENDERS}" for e in events)  # beyond the cap: not logged
+  assert cache.snapshot.quorum_status == BYZANTINE  # ... yet still sticky Byzantine
+  for who in range(MAX_OFFENDERS):  # every logged offender keeps its first event
+    assert {"reason": "e0", "offender": f"o{who}", "at_ms": 0} in events
 
 
 # ================================================ TC-6.11 / TC-6.5: crash faults

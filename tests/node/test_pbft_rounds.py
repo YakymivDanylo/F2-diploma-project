@@ -156,7 +156,7 @@ def test_prepare_votes_count_primary_implicitly_and_ignore_its_prepare(
       feed(node, vote(node_env, PREPARE, "node3", block))
       await until(lambda: current.prepared)
       assert node.engine.prepare_votes(current) == 3
-      assert len(sent_of(sent, "pbft_commit")) >= 1
+      await until(lambda: len(sent_of(sent, "pbft_commit")) >= 1)  # sends are async tasks
 
   run(scenario())
 
