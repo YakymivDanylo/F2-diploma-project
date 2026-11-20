@@ -2,6 +2,12 @@
 
 All notable changes to this project, newest first. Entries are grouped by UTC date.
 
+## 2026-11-20
+
+### Replace a failed PBFT leader automatically — 10:55 UTC
+**Summary:** If the leading validator goes offline or misbehaves, the others now pick a new leader within seconds and keep accepting documents.
+**Details:** Validators vote to change the leader when a round stalls, the leader is unreachable, or it proposes an invalid block. A block that may already be agreed is carried over, never replaced, and votes are saved to disk so a restart cannot cause conflicting votes. The node status now separates a lying validator from too few validators being online, and lists reported misbehaviour.
+
 ## 2026-11-13
 
 ### Add PBFT voting between validators — 17:18 UTC
