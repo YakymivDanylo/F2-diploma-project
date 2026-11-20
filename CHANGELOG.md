@@ -4,6 +4,10 @@ All notable changes to this project, newest first. Entries are grouped by UTC da
 
 ## 2026-11-20
 
+### Accept documents at any validator — 11:37 UTC
+**Summary:** A document can now be submitted to any of the four institutions' nodes, not only to the current leader.
+**Details:** A node that is not the leader signs the document with its own institution's key and passes it to the leader, which checks the sender, the record and duplicates in a fixed order before queuing it. The client gets the same answer either way. Floods from other nodes are limited, and a leader that accepts documents but never includes them is voted out.
+
 ### Replace a failed PBFT leader automatically — 10:55 UTC
 **Summary:** If the leading validator goes offline or misbehaves, the others now pick a new leader within seconds and keep accepting documents.
 **Details:** Validators vote to change the leader when a round stalls, the leader is unreachable, or it proposes an invalid block. A block that may already be agreed is carried over, never replaced, and votes are saved to disk so a restart cannot cause conflicting votes. The node status now separates a lying validator from too few validators being online, and lists reported misbehaviour.
