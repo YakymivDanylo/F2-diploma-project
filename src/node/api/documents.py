@@ -125,6 +125,9 @@ async def submit_document(body: SubmitRequest, request: Request) -> SubmitAck:
       metadata=body.metadata,
       issuer_private_key=context.state.issuer_key.private_key,
     )
+    if local and context.config.consensus_mode == "pbft":
+      if context.primary_status().kind != "self":  # a view change began meanwhile
+        raise _retryable("no_primary", "no primary is established, retry shortly")
     if local:
       context.mempool.add(record)
       engine = request.app.state.engine
@@ -150,6 +153,9 @@ async def submit_document(body: SubmitRequest, request: Request) -> SubmitAck:
     error = _error_for(code)
     if error is not None:
       raise error
+    watch = getattr(request.app.state.engine, "watch_forwarded", None)
+    if watch is not None:
+      watch(document_hash, primary_id)  # a primary that accepts but never proposes
 
   return SubmitAck(
     status="accepted",

@@ -40,12 +40,19 @@ from node.chain_state import ChainState
 from node.config import NodeConfig, load_config
 from node.consensus.base import ConsensusEngine
 from node.consensus.pbft.engine import PbftEngine
+from node.consensus.pbft.forward import (
+  ForwardChannel,
+  RecordIntake,
+  WsRecordForwarder,
+  is_forward_message,
+)
 from node.consensus.pbft.state_store import PbftStateStore, state_path_for
 from node.consensus.pow import PowEngine
 from node.errors import install_error_handlers
 from node.forwarding import (
   ForwardService,
   PendingForwards,
+  PrimaryStatus,
   PrimaryStatusProvider,
   RecordForwarder,
   UnavailableForwarder,
@@ -234,8 +241,24 @@ def create_app(
   network_options: dict[str, Any] | None = None,
   chain_fetcher: ChainFetcher | None = None,
 ) -> FastAPI:
+  pbft_engine: PbftEngine | None = None
+
+  def engine_primary_status() -> PrimaryStatus:
+    # Under PBFT the engine knows the primary: self / other / none during a view change.
+    if pbft_engine is None:
+      return default_primary_status()
+    kind, primary = pbft_engine.primary_status()
+    if kind == "self":
+      return PrimaryStatus.self_()
+    if kind == "other" and primary is not None:
+      return PrimaryStatus.other(primary)
+    return PrimaryStatus.none()
+
+  is_pbft = config.consensus_mode == "pbft" and mine
   context = build_node_context(
-    config, forwarder=forwarder, primary_status=primary_status
+    config,
+    forwarder=forwarder,
+    primary_status=primary_status or (engine_primary_status if is_pbft else None),
   )  # fail fast at construction, not on first request
 
   def lookup_key(node_id: str) -> PublicKey | None:
@@ -260,7 +283,6 @@ def create_app(
   )
   announcements: set[asyncio.Task[None]] = set()
   engine: ConsensusEngine | None = None
-  pbft_engine: PbftEngine | None = None
 
   def is_validator(node_id: str) -> bool:
     return node_id in context.resolvers.current.active_node_ids
@@ -341,9 +363,38 @@ def create_app(
   )
   pbft_receiver = PbftReceiver(pbft_engine, is_validator=is_validator, flag=manager.flag)
 
+  async def send_direct(message: dict[str, Any], targets: Any) -> dict[str, bool]:
+    return await manager.broadcast(message, only=targets)
+
+  intake = None
+  if pbft_engine is not None:
+    running = pbft_engine
+    intake = RecordIntake(
+      context,
+      lookup_key=lookup_key,
+      is_validator=is_validator,
+      is_primary=lambda: running.primary_status()[0] == "self",
+      on_queued=running.on_submission,
+      accepting=lambda: bool(getattr(app.state, "accepting", False)),
+    )
+  forward_channel = ForwardChannel(
+    intake=intake, pending=context.forwarding.pending, send=send_direct, flag=manager.flag
+  )
+  if pbft_engine is not None and forwarder is None:
+    context.forwarding.use(
+      WsRecordForwarder(
+        self_id=config.node_id,
+        key=context.state.node_key.private_key,
+        send=send_direct,
+        channel=lambda: forward_channel,
+      )
+    )
+
   async def dispatch(peer_id: str, message: dict[str, Any]) -> None:
     if is_pbft_message(message):
       await pbft_receiver.on_message(peer_id, message)
+    elif is_forward_message(message):
+      await forward_channel.on_message(peer_id, message)
     else:
       await receiver.on_message(peer_id, message)
 
@@ -407,6 +458,7 @@ def create_app(
       await asyncio.gather(*background, return_exceptions=True)
       if engine is not None:
         await engine.stop()
+      await forward_channel.stop()
       for announcement in list(announcements):
         announcement.cancel()
       await manager.stop()
@@ -421,6 +473,7 @@ def create_app(
   app.state.manager = manager
   app.state.receiver = receiver
   app.state.pbft_receiver = pbft_receiver
+  app.state.forward_channel = forward_channel
   app.state.sync = sync
   app.state.accepting = False  # the lifespan flips it once the startup sync is done
   install_error_handlers(app)

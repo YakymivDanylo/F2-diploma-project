@@ -1,9 +1,9 @@
 """RecordForwarder contract: a non-primary hands an already-signed record to the primary.
 
 This module defines the interface, the closed reply enum, the primary-status seam and the
-pending-request table. The real `WS /ws/pbft` channel, authentication and the primary-side
-acceptance live in Slice 17b; until then only a stub exists and the local-queue path runs
-for real. The proposer never re-signs a forwarded record.
+pending-request table. The real channel (`forward_record` on the authenticated peer link),
+sender authentication and the primary-side acceptance are `node.consensus.pbft.forward`
+(Slice 17b). The proposer never re-signs a forwarded record.
 """
 
 from __future__ import annotations
@@ -69,7 +69,8 @@ PrimaryStatusProvider = Callable[[], PrimaryStatus]
 
 
 def default_primary_status() -> PrimaryStatus:
-  """Seam: until Slices 17/18 establish a primary, every node queues locally."""
+  """Without a PBFT engine (PoW, or a node that runs no consensus) every node queues locally.
+  Under PBFT the engine-backed status replaces it (wired in `node.main`)."""
   return PrimaryStatus.self_()
 
 
@@ -108,6 +109,10 @@ class PendingForwards:
     future.set_result(reply)
     return True
 
+  def has(self, request_id: str) -> bool:
+    future = self._futures.get(request_id)
+    return future is not None and not future.done()
+
   def discard(self, request_id: str) -> None:
     self._futures.pop(request_id, None)
 
@@ -127,6 +132,10 @@ class ForwardService:
     self.pending = pending
     self._timeout_s = timeout_ms / 1000
     self._new_request_id = new_request_id
+
+  def use(self, forwarder: RecordForwarder) -> None:
+    """Install the real channel once the network exists (Slice 17b)."""
+    self._forwarder = forwarder
 
   async def forward(self, record: DocumentRecord, primary_id: str) -> str:
     """Forward once and await one reply. Returns a code from `REPLY_CODES`."""

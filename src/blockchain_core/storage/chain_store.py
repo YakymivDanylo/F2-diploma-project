@@ -186,6 +186,13 @@ def _record_from_dict(data: object, what: str) -> DocumentRecord:
   )
 
 
+def record_from_dict(data: object) -> DocumentRecord:
+  """Strictly decode one signed record dict (exact keys, typed fields), e.g. a record a peer
+  forwards. Raises `ChainStoreCorruptedError` (a ValueError) on any deviation."""
+  _check_depth(data)
+  return _record_from_dict(data, "record")
+
+
 # A block dict nests records (2 levels) above the canonical structures they contain.
 _MAX_BLOCK_DEPTH = MAX_DEPTH + 3
 

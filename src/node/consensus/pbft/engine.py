@@ -92,6 +92,8 @@ RETRY_SECONDS = 1.0
 TRANSIENT_REASONS = frozenset({"timestamp_in_future", "timestamp_too_old"})
 MAX_INBOX = 1024
 MAX_INBOX_PER_SENDER = 128
+MAX_WATCHED = 1024
+CENSORSHIP_TIMEOUTS = 3  # round timeouts a forwarded, accepted record may take to finalize
 MAX_NEW_VIEW_JUMP = 1024  # a proof is quorum-signed; this only bounds the work per message
 
 # send(message, targets): targets None = every ValidatorSet member
@@ -214,6 +216,7 @@ class PbftEngine:
     self._dirty = False
     self.finalized_rounds = 0
     self.view_changes = 0
+    self._watched: dict[str, tuple[float, int]] = {}  # forwarded hash -> (deadline, view)
     self._lock = self._restore_lock(persisted.lock)
     self._restore_view_change(persisted.vc_vote)
     # A sync replace mid-round (UC-17 side effect): the listener runs inside the ChainState
@@ -276,6 +279,19 @@ class PbftEngine:
   # ------------------------------------------------------------- engine interface
 
   def on_submission(self, record: DocumentRecord) -> None:
+    self._wake.set()
+
+  def watch_forwarded(self, document_hash: str, primary_id: str) -> None:
+    """`primary_id` accepted a record we forwarded. If it is not finalized within a few round
+    timeouts while that primary stays - and blocks it finalizes meanwhile had room for it -
+    we vote to change the view (a censoring primary, UC-16-EC6). The record itself is not
+    resurrected: the client must resubmit."""
+    if self.primary_of(self.view) != primary_id:
+      return  # the view moved while we forwarded: that primary is gone anyway
+    if len(self._watched) >= MAX_WATCHED:
+      self._watched.pop(next(iter(self._watched)))
+    deadline = self._monotonic() + CENSORSHIP_TIMEOUTS * self._round_timeout_s
+    self._watched[document_hash] = (deadline, self.view)
     self._wake.set()
 
   async def on_inbound_block(self, block: Block) -> bool:
@@ -997,8 +1013,8 @@ class PbftEngine:
           sorted(self._up_members() | {self._self_id}),
         )
       return
-    reason = None
     current = self.round(self._chain_state.tip.index + 1)
+    reason = None
     if (
       current is not None
       and current.opened_at is not None
@@ -1011,8 +1027,25 @@ class PbftEngine:
       and now - self._primary_down_since >= self._round_timeout_s
     ):
       reason = f"primary {self.primary_of(self.view)} unreachable"
+    else:
+      # Consumes the overdue watch: the record is not resurrected, its client resubmits.
+      reason = self._censorship()
     if reason is not None:
       await self._start_view_change(self.view + 1, reason)
+
+  def _censorship(self) -> str | None:
+    """A forwarded record the current primary accepted but has not finalized in time."""
+    now = self._monotonic()
+    overdue = None
+    for document_hash, (deadline, view) in list(self._watched.items()):
+      if self._chain_state.has_document(document_hash) or view != self.view:
+        del self._watched[document_hash]  # finalized, or that primary is gone anyway
+      elif now >= deadline and overdue is None:
+        overdue = document_hash
+    if overdue is None:
+      return None
+    del self._watched[overdue]
+    return f"a record accepted by primary {self.primary_of(self.view)} was not finalized in time"
 
   async def _start_view_change(self, target: int, reason: str) -> None:
     if target <= self.view or (self._vc.target is not None and target <= self._vc.target):
@@ -1217,6 +1250,10 @@ class PbftEngine:
         self._vc.latest.pop(self._self_id, None)
         self._vc_wire = None
         self._dirty = True
+    if len(tip.document_records) >= self._max_batch and self._watched:
+      # A full block: the primary is busy, not censoring - give watched records more time.
+      later = self._monotonic() + CENSORSHIP_TIMEOUTS * self._round_timeout_s
+      self._watched = {h: (max(d, later), v) for h, (d, v) in self._watched.items()}
     ready = [m for m in self._ahead.values() if m.seq == next_seq]
     self._ahead = {k: m for k, m in self._ahead.items() if m.seq > next_seq}
     # pre-prepare first, so the candidate exists when the votes arrive
