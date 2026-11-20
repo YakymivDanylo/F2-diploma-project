@@ -164,6 +164,7 @@ class ValidationGateway:
     primary_id: str,
     view: int,
     known: Callable[[str], bool],
+    allow_old: bool = False,
   ) -> InboundVerdict:
     """Judge a PBFT pre-prepare candidate before voting `prepare` on it (UC-6 step 2).
 
@@ -171,7 +172,9 @@ class ValidationGateway:
     core's `validate_candidate`: only the commit quorum is skipped (the votes do not exist
     yet). The timestamp must be within the skew window on BOTH sides: a primary must not
     back-date a block to a time when a since-retired key still resolved. `known` is the
-    cross-block document-uniqueness rule."""
+    cross-block document-uniqueness rule. `allow_old` skips only the lower bound, for a block
+    carried into a later view with a verified prepared certificate (old by definition; its
+    `primary_id` / `view` are those of the view it was first proposed in)."""
     if block.algorithm != "pbft" or block.proposer_id != primary_id:
       return _reject("not_primary")
     if dict(block.sealed_consensus) != {"view_number": view} or block.commit_signatures:
@@ -187,7 +190,7 @@ class ValidationGateway:
       reject_future_timestamp(block.timestamp, now_ms=now, max_skew_ms=self._max_skew)
     except ApiError:
       return _reject("timestamp_in_future")
-    if block.timestamp < now - self._max_skew:
+    if not allow_old and block.timestamp < now - self._max_skew:
       return _reject("timestamp_too_old")
     result = self.validator.candidate(tip, block)
     if not result.valid:
@@ -195,6 +198,27 @@ class ValidationGateway:
     if first_duplicate_document([block], known) is not None:
       return _reject("duplicate_document")
     return InboundVerdict("accept")
+
+  def finalized_conflict(self, block: Block) -> frozenset[str] | None:
+    """The members that committed to BOTH `block` and the different block we hold at its
+    height, when `block` is itself FINALIZED (full checklist, commit quorum included, on our
+    chain's prefix): two finalized blocks at one height - a safety violation. None when it is
+    not one (e.g. a relayed, never-finalized candidate). CPU-heavy: call it off the loop."""
+    blocks = self._chain_view()
+    validator_set = self.validator.validator_set
+    if validator_set is None or not 1 <= block.index < len(blocks):
+      return None
+    stored = blocks[block.index]
+    if stored.block_hash == block.block_hash:
+      return None
+    if len({c.node_id for c in block.commit_signatures}) < validator_set.quorum:
+      return None  # cheap: cannot be finalized, skip the expensive checklist
+    if not self.validator.extension(blocks[block.index - 1], [block]).valid:
+      return None
+    both = {c.node_id for c in block.commit_signatures} & {
+      c.node_id for c in stored.commit_signatures
+    }
+    return frozenset(both)
 
   def screen(self, block: Block) -> InboundVerdict:
     """Judge a block received from any peer. Pure: it never mutates anything."""

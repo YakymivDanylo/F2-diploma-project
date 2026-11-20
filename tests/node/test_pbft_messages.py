@@ -348,7 +348,7 @@ def test_conflicting_second_prepare_is_not_counted(node_env: NodeEnv) -> None:
       feed(node, vote(node_env, PREPARE, "node3", block))
       await drain(node)
       current = node.engine.round(1)
-      assert current.prepares["node3"] == HASH
+      assert current.prepares["node3"][0] == HASH
       assert ("pbft_prepare", "node3", HASH, block.block_hash) in current.conflicts
       assert node.engine.prepare_votes(current) == 2 and not current.prepared
       # and the reverse order: our hash first, then a different one
@@ -357,7 +357,7 @@ def test_conflicting_second_prepare_is_not_counted(node_env: NodeEnv) -> None:
       assert node.engine.prepare_votes(current) == 3 and current.prepared
       feed(node, vote(node_env, PREPARE, "node4", block, block_hash=HASH))
       await drain(node)
-      assert current.prepares["node4"] == block.block_hash
+      assert current.prepares["node4"][0] == block.block_hash
 
   run(scenario())
 

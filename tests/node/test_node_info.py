@@ -23,6 +23,8 @@ FIELDS = {
   "chain_valid",
   "first_invalid_index",
   "quorum_status",
+  "liveness",
+  "byzantine_events",
   "issuer_id",
   "issuer_name",
   "peer_health",
@@ -52,7 +54,9 @@ def test_genesis_only_node(node_env: NodeEnv) -> None:  # CN-TC-12.1 / 12.3
     assert body["tip_index"] == 0
     assert body["chain_valid"] is True
     assert body["first_invalid_index"] is None
-    assert body["quorum_status"] == "healthy"
+    # a lone PBFT node reaches no other member: no quorum can form (crash fault, UC-6-E5)
+    assert body["quorum_status"] == body["liveness"] == "crash_fault_quorum_loss"
+    assert body["byzantine_events"] == []
     assert body["issuer_id"] == "issuer1"
     assert body["issuer_name"] == "issuer1"  # no registry name -> falls back to the id
 

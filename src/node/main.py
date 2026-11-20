@@ -40,6 +40,7 @@ from node.chain_state import ChainState
 from node.config import NodeConfig, load_config
 from node.consensus.base import ConsensusEngine
 from node.consensus.pbft.engine import PbftEngine
+from node.consensus.pbft.state_store import PbftStateStore, state_path_for
 from node.consensus.pow import PowEngine
 from node.errors import install_error_handlers
 from node.forwarding import (
@@ -274,8 +275,13 @@ def create_app(
     engine = PowEngine(context, on_block_mined=announce)
   elif mine:  # pbft: votes go to ValidatorSet members only, never to PeerInfo peers
 
-    async def send_votes(message: dict[str, Any]) -> None:
-      await manager.broadcast(message, only=context.resolvers.current.active_node_ids)
+    async def send_votes(message: dict[str, Any], targets: Any = None) -> None:
+      members = context.resolvers.current.active_node_ids
+      only = members if targets is None else set(targets) & members
+      await manager.broadcast(message, only=only)
+
+    def peers_up() -> set[str]:
+      return {node_id for node_id, status in manager.health().items() if status == "up"}
 
     pbft_engine = PbftEngine(
       context,
@@ -283,6 +289,9 @@ def create_app(
       on_finalized=announce,  # finalized blocks also reach non-validators and lagging nodes
       flag=manager.flag,
       on_needs_sync=lambda peer_id: sync.request(peer_id),
+      peer_up=peers_up,
+      state_store=PbftStateStore(state_path_for(config.chain_path)),
+      round_timeout_s=config.pbft_round_timeout_s,
     )
     engine = pbft_engine
   sync = ChainSync(
@@ -299,7 +308,37 @@ def create_app(
     is_validator=is_validator,
     sleep=sleep,
   )
-  receiver = BlockReceiver(context.gateway, engine, manager, on_needs_sync=sync.request)
+
+  judged: set[tuple[int, str]] = set()  # (index, hash) already judged: no repeated work
+
+  async def judge_conflict(peer_id: str, block: Block) -> None:
+    offenders = await asyncio.to_thread(context.gateway.finalized_conflict, block)
+    if offenders is not None:
+      context.chain_state.report_byzantine_event(
+        f"two finalized blocks at height {block.index} (received from {peer_id}); "
+        f"members that committed to both: {sorted(offenders)}",
+        offender=",".join(sorted(offenders)) or None,
+      )
+
+  def on_equivocation(peer_id: str, block: Block) -> None:
+    # UC-8-E4: a different block at a finalized height. A Byzantine event only when BOTH are
+    # finalized (quorum-signed): a relayed unfinalized candidate proves nothing. The culprits
+    # are the members whose commits are on both blocks, whoever proposed them.
+    key = (block.index, block.block_hash)
+    if key in judged or len(judged) >= 4096:
+      return
+    judged.add(key)
+    task = asyncio.create_task(judge_conflict(peer_id, block))
+    announcements.add(task)
+    task.add_done_callback(announcements.discard)
+
+  receiver = BlockReceiver(
+    context.gateway,
+    engine,
+    manager,
+    on_needs_sync=sync.request,
+    on_equivocation=on_equivocation if pbft_engine is not None else None,
+  )
   pbft_receiver = PbftReceiver(pbft_engine, is_validator=is_validator, flag=manager.flag)
 
   async def dispatch(peer_id: str, message: dict[str, Any]) -> None:

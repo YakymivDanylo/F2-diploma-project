@@ -126,5 +126,5 @@ def test_node_info_reports_the_institution(node_env: NodeEnv) -> None:  # CN-TC-
   write_issuers(node_env, [issuer_entry("issuer1", node_env.issuer_key, name="Institution A")])
   for client, _ in _serve(node_env, pbft_chain(node_env, 1)):
     body = client.get("/node/info").json()
-    assert len(body) == 12
+    assert len(body) == 14
     assert (body["issuer_id"], body["issuer_name"]) == ("issuer1", "Institution A")

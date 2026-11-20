@@ -147,7 +147,7 @@ def test_prepare_votes_count_primary_implicitly_and_ignore_its_prepare(
       await until(lambda: node.engine.round(1) and node.engine.round(1).candidate)
       current = node.engine.round(1)
       assert node.engine.prepare_votes(current) == 2  # implicit primary + our own prepare
-      assert len(sent_of(sent, "pbft_prepare")) >= 1
+      await until(lambda: len(sent_of(sent, "pbft_prepare")) >= 1)  # sends are async tasks
       feed(node, vote(node_env, PREPARE, "node1", block))  # a prepare "from" the primary
       await drain(node)
       assert "node1" not in current.prepares

@@ -113,8 +113,10 @@ class BlockReceiver:
     manager: PeerConnectionManager,
     *,
     on_needs_sync: Callable[[str], None] | None = None,
+    on_equivocation: Callable[[str, Block], None] | None = None,
   ) -> None:
     self._gateway = gateway
+    self._on_equivocation = on_equivocation
     self._engine = engine
     self._manager = manager
     self._on_needs_sync = on_needs_sync
@@ -148,6 +150,8 @@ class BlockReceiver:
       return verdict
     if verdict.kind == "reject":
       self._manager.flag(peer_id, f"rejected block: {verdict.reason}")
+      if verdict.reason == "conflict" and self._on_equivocation is not None:
+        self._on_equivocation(peer_id, block)  # UC-8-E4: judged (and reported) by the caller
       return verdict
     if self._engine is None or not await self._engine.on_inbound_block(block):
       logger.info("block %d from %s was valid but not adopted", block.index, peer_id)

@@ -119,11 +119,12 @@ class ChainState:
   def document_positions(self, document_hash: str) -> list[int]:
     return self._documents.block_indexes(document_hash)
 
-  def report_byzantine_event(self, reason: str) -> None:
-    """A safety violation (e.g. two differently-finalized PBFT blocks at one height): never
-    resolved by a tie-break, only logged and surfaced as `quorum_status`."""
+  def report_byzantine_event(self, reason: str, *, offender: str | None = None) -> None:
+    """A safety violation (two differently-finalized PBFT blocks at one height, or a member
+    signing two different votes for one slot): never resolved by a tie-break, only logged and
+    surfaced as `quorum_status` plus an entry in the Byzantine event log."""
     logger.error("SAFETY VIOLATION (Byzantine event): %s", reason)
-    self._cache.flag_byzantine_event()
+    self._cache.flag_byzantine_event(reason, offender=offender)
 
   def add_replace_listener(self, listener: ReplaceListener) -> None:
     """`listener(new_blocks)` runs inside the critical section after a successful replace, once

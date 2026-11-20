@@ -39,6 +39,7 @@ class NodeConfig:
   init_chain: bool  # explicit initialization: only then may a missing chain become genesis
   startup_sync_timeout_s: float  # bound on the load -> sync -> serve wait (UC-3-EC4)
   sync_interval_s: float  # periodic chain sync with peers once serving
+  pbft_round_timeout_s: float  # PBFT: a stuck round or unreachable primary -> view change
 
 
 def _get(env: Mapping[str, str], key: str, default: str | None = None) -> str:
@@ -150,4 +151,5 @@ def load_config(env: Mapping[str, str] | None = None) -> NodeConfig:
     init_chain=_flag(source, "INIT_CHAIN"),
     startup_sync_timeout_s=_float(source, "STARTUP_SYNC_TIMEOUT_S", 10.0, minimum=0.0),
     sync_interval_s=_float(source, "SYNC_INTERVAL_S", 5.0, minimum=0.05),
+    pbft_round_timeout_s=_float(source, "PBFT_ROUND_TIMEOUT_S", 5.0, minimum=0.05),
   )

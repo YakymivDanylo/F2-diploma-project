@@ -20,6 +20,8 @@ class NodeInfo(BaseModel):
   chain_valid: bool
   first_invalid_index: int | None
   quorum_status: str
+  liveness: str  # PBFT engine: healthy | view_change_in_progress | crash_fault_quorum_loss
+  byzantine_events: list[dict[str, object]]  # recent equivocation / safety-violation reports
   issuer_id: str  # the institution this node belongs to
   issuer_name: str
   peer_health: dict[str, str]  # node_id -> up | reconnecting | down (FR-12)
@@ -41,6 +43,8 @@ async def node_info(request: Request) -> NodeInfo:
     chain_valid=snapshot.chain_valid,
     first_invalid_index=snapshot.first_invalid_index,
     quorum_status=snapshot.quorum_status,
+    liveness=context.validity_cache.liveness,
+    byzantine_events=context.validity_cache.byzantine_events,
     issuer_id=context.config.issuer_id,
     issuer_name=context.issuers.name_of(context.config.issuer_id),
     peer_health=request.app.state.manager.health(),
