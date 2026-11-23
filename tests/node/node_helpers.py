@@ -25,3 +25,14 @@ class NodeEnv:
   @property
   def issuers_path(self) -> Path:
     return Path(self.env["ISSUERS_PATH"])
+
+
+def write_issuers(env: NodeEnv, entries: list[dict]) -> None:
+  """Replace the IssuerRegistry file of `env` with `entries`."""
+  import json
+
+  env.issuers_path.write_text(json.dumps({"issuers": entries}), encoding="utf-8")
+
+
+def issuer_entry(issuer_id: str, pair: IssuerKeyPair, **extra) -> dict:
+  return {"issuer_id": issuer_id, "public_key": pem_of(pair), **extra}

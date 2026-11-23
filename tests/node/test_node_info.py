@@ -9,8 +9,9 @@ from node_helpers import NodeEnv
 
 from blockchain_core import public_key_to_pem
 from node.config import load_config
+from node.context import NodeContext
 from node.key_resolver import CombinedKeyResolver, ResolverHolder
-from node.main import NodeContext, create_app
+from node.main import create_app
 from node.validity_cache import ChainValidator, ValidityCache
 
 FIELDS = {
@@ -23,6 +24,12 @@ FIELDS = {
   "chain_valid",
   "first_invalid_index",
   "quorum_status",
+  "liveness",
+  "byzantine_events",
+  "issuer_id",
+  "issuer_name",
+  "peer_health",
+  "serving",
 }
 
 
@@ -49,7 +56,11 @@ def test_genesis_only_node(node_env: NodeEnv) -> None:  # CN-TC-12.1 / 12.3
     assert body["tip_index"] == 0
     assert body["chain_valid"] is True
     assert body["first_invalid_index"] is None
-    assert body["quorum_status"] == "healthy"
+    # a lone PBFT node reaches no other member: no quorum can form (crash fault, UC-6-E5)
+    assert body["quorum_status"] == body["liveness"] == "crash_fault_quorum_loss"
+    assert body["byzantine_events"] == []
+    assert body["issuer_id"] == "issuer1"
+    assert body["issuer_name"] == "issuer1"  # no registry name -> falls back to the id
 
 
 def test_pow_node_reports_configured_n_and_f(node_env: NodeEnv) -> None:  # CN-TC-12.6

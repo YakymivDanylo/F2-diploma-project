@@ -36,13 +36,15 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Protocol, Self
 
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
 from ..block import Block, CommitSignature
 from ..canonical import MAX_DEPTH, canonicalize
 from ..chain import Chain
 from ..document_record import DocumentRecord
 from ..keys import IssuerKeyPair, KeyResolver, NodeKeyPair
 from ..validation import ValidationResult, ValidatorSet, validate_chain
-from .key_store import load_issuer_key_pair, load_node_key_pair
+from .key_store import fsync_directory, load_issuer_key_pair, load_node_key_pair
 
 if sys.platform == "win32":
   import msvcrt
@@ -109,6 +111,14 @@ class ChainStoreLockedError(ChainStoreError):
 
 class ChainStoreMissingError(ChainStoreError):
   """Raised when no persisted chain exists and the caller did not ask for a fresh one."""
+
+
+class SharedKeyMaterialError(ValueError):
+  """Raised at startup when the issuer key and the node key are the same key pair.
+
+  The two roles must stay separate: one compromised file would otherwise forge both
+  document records and blocks.
+  """
 
 
 class ChainStoreWriteError(ChainStoreError):
@@ -184,6 +194,13 @@ def _record_from_dict(data: object, what: str) -> DocumentRecord:
     ipfs_cid=_str(fields, "ipfs_cid", what, optional=True),
     signature=_str(fields, "signature", what, optional=True),
   )
+
+
+def record_from_dict(data: object) -> DocumentRecord:
+  """Strictly decode one signed record dict (exact keys, typed fields), e.g. a record a peer
+  forwards. Raises `ChainStoreCorruptedError` (a ValueError) on any deviation."""
+  _check_depth(data)
+  return _record_from_dict(data, "record")
 
 
 # A block dict nests records (2 levels) above the canonical structures they contain.
@@ -417,6 +434,7 @@ class JsonChainStore(_LockedStore):
         handle.flush()
         os.fsync(handle.fileno())
       os.replace(temp, self.path)
+      fsync_directory(self.path.parent)
     except OSError as exc:
       raise ChainStoreWriteError(f"cannot write chain store {self.path}: {exc}") from exc
     finally:
@@ -496,6 +514,7 @@ class SqliteChainStore(_LockedStore):
       finally:
         connection.close()
       os.replace(temp, self.path)
+      fsync_directory(self.path.parent)
     except (sqlite3.DatabaseError, OSError) as exc:
       raise ChainStoreWriteError(f"cannot write chain database {self.path}: {exc}") from exc
     finally:
@@ -569,6 +588,10 @@ def restore_chain(
   return RestoredChain(chain=chain, blocks=blocks, validation=validation)
 
 
+def _public_der(key_pair: IssuerKeyPair | NodeKeyPair) -> bytes:
+  return key_pair.public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+
+
 def restore_node_state(
   chain_store: ChainStore,
   *,
@@ -580,9 +603,16 @@ def restore_node_state(
   validator_set: ValidatorSet | None = None,
   allow_fresh: bool = False,
 ) -> NodeState:
-  """Reload all three stores; missing key material fails fast and is never regenerated."""
+  """Reload all three stores; missing key material fails fast and is never regenerated.
+
+  Raises `SharedKeyMaterialError` if the issuer and node stores hold the same key.
+  """
   issuer_key = load_issuer_key_pair(issuer_key_path)
   node_key = load_node_key_pair(node_key_path)
+  if _public_der(issuer_key) == _public_der(node_key):
+    raise SharedKeyMaterialError(
+      "issuer key and node key are the same key; each role needs its own key pair"
+    )
   restored = restore_chain(
     chain_store,
     resolve_node_key=resolve_node_key,

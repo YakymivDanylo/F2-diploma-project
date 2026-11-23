@@ -9,8 +9,10 @@ from pydantic import StringConstraints
 
 from blockchain_core import CanonicalizationError, canonicalize
 from node.errors import ApiError
+from node.patterns import HASH_PATTERN
 
-HASH_PATTERN = r"^[0-9a-f]{64}$"
+__all__ = ["HASH_PATTERN", "Hash64", "validate_metadata_size"]
+
 Hash64 = Annotated[str, StringConstraints(pattern=HASH_PATTERN)]
 
 
@@ -23,6 +25,8 @@ def validate_metadata_size(metadata: Mapping[str, Any], max_bytes: int) -> None:
     size = len(canonicalize(dict(metadata)))
   except CanonicalizationError as exc:
     raise ApiError(422, "invalid_metadata", f"metadata cannot be encoded: {exc}") from exc
+  except RecursionError:
+    raise ApiError(422, "invalid_metadata", "metadata is nested too deeply") from None
   if size > max_bytes:
     raise ApiError(
       422,

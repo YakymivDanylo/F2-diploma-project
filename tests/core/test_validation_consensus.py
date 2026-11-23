@@ -472,11 +472,48 @@ def test_retired_member_listed_in_members_only_counts_while_its_key_resolves():
   retired_at = blocks[2].timestamp
 
   def resolver(node_id, at_timestamp):
+    # "v3" replaces "retired": exactly n=4 keys are in force at every timestamp.
     if node_id == "retired":
       return retired_key.public_key if at_timestamp < retired_at else None
+    if node_id == "v3" and at_timestamp < retired_at:
+      return None
     return _resolve_node_key(node_id, at_timestamp)
 
   _assert_invalid(_validate(blocks, validator_set=vset, resolve_node_key=resolver), 2, "quorum")
+
+
+def test_more_than_n_members_with_keys_in_force_fails_closed_with_quorum():
+  # A validator replaced by a new id while the old key's retirement is still in the
+  # future: five identities can vote at once with n=4, so quorum intersection breaks.
+  vset = ValidatorSet(members=frozenset({*_VALIDATOR_IDS, "retired"}), n=4, f=1)
+  retired_key = generate_node_keypair()
+
+  def resolver(node_id, at_timestamp):
+    return retired_key.public_key if node_id == "retired" else _resolve_node_key(node_id, 0)
+
+  blocks = _pbft_chain(1, _VALIDATOR_IDS)  # even a full honest quorum does not help
+
+  _assert_invalid(_validate(blocks, validator_set=vset, resolve_node_key=resolver), 1, "quorum")
+
+
+def test_exactly_n_members_with_keys_in_force_is_accepted():
+  vset = ValidatorSet(members=frozenset({*_VALIDATOR_IDS, "retired"}), n=4, f=1)
+
+  def resolver(node_id, at_timestamp):
+    return None if node_id == "retired" else _resolve_node_key(node_id, at_timestamp)
+
+  assert _validate(_pbft_chain(2), validator_set=vset, resolve_node_key=resolver).valid
+
+
+def test_active_key_count_treats_raising_resolver_as_inactive():
+  vset = ValidatorSet(members=frozenset({*_VALIDATOR_IDS, "retired"}), n=4, f=1)
+
+  def resolver(node_id, at_timestamp):
+    if node_id == "retired":
+      raise RuntimeError("registry down")
+    return _resolve_node_key(node_id, at_timestamp)
+
+  assert _validate(_pbft_chain(1), validator_set=vset, resolve_node_key=resolver).valid
 
 
 def test_non_tuple_commit_signatures_is_structural():
@@ -541,12 +578,45 @@ def test_quorum_failure_reported_at_first_offending_block():
   _assert_invalid(_validate_pbft(blocks), 3, "quorum")
 
 
-def test_earlier_checks_take_precedence_over_quorum():
+def test_quorum_is_checked_before_merkle_and_record_signatures():
+  # The quorum depends only on block_hash and the votes, so a block without one never
+  # costs Merkle hashing or per-record signature checks: it reports "quorum" first.
   genesis = build_genesis_block()
   block = _pbft_block(genesis, 1, ("v0",))
   tampered = _rehash(block, merkle_root="ab" * 32)
 
+  _assert_invalid(_validate_pbft([genesis, tampered]), 1, "quorum")
+
+
+def test_merkle_is_reported_once_the_quorum_holds():
+  genesis = build_genesis_block()
+  block = _pbft_block(genesis, 1)
+  tampered = _with_commits(_sign(_rehash(block, merkle_root="ab" * 32)), _VALIDATOR_IDS[:3])
+
   _assert_invalid(_validate_pbft([genesis, tampered]), 1, "merkle")
+
+
+def test_hash_and_link_take_precedence_over_quorum():
+  genesis = build_genesis_block()
+  block = _pbft_block(genesis, 1, ("v0",))
+
+  _assert_invalid(_validate_pbft([genesis, replace(block, block_hash="ab" * 32)]), 1, "hash")
+  relinked = _rehash(block, previous_hash="cd" * 32)
+  _assert_invalid(_validate_pbft([genesis, relinked]), 1, "link")
+
+
+def test_quorum_check_skips_record_signature_verification(monkeypatch):
+  import blockchain_core.validation as validation
+
+  calls: list[object] = []
+  monkeypatch.setattr(
+    validation, "verify_document_record", lambda record, key: calls.append(record) or True
+  )
+  genesis = build_genesis_block()
+  no_quorum = _pbft_block(genesis, 1, ("v0",))
+
+  _assert_invalid(_validate_pbft([genesis, no_quorum]), 1, "quorum")
+  assert calls == []
 
 
 # ---------------------------------------------------------------- shared checklist

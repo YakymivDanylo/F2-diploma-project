@@ -19,6 +19,7 @@ from blockchain_core import (
   sign_commit,
 )
 from blockchain_core.validation import pow_target
+from node.consensus.pbft.state_store import PbftState, PbftStateStore, state_path_for
 
 BASE_TS = 1_700_000_001_000
 STEP = 1_000
@@ -34,7 +35,9 @@ def _record(env: NodeEnv, seed: int):
   )
 
 
-def _candidate(env: NodeEnv, previous: Block, seed: int, algorithm, sealed, proposer="node1"):
+def _candidate(
+  env: NodeEnv, previous: Block, seed: int, algorithm, sealed, proposer="node1", timestamp=None
+):
   def resolve_issuer(issuer_id: str, at_timestamp: int):
     return env.issuer_key.public_key if issuer_id == "issuer1" else None
 
@@ -42,7 +45,7 @@ def _candidate(env: NodeEnv, previous: Block, seed: int, algorithm, sealed, prop
     [_record(env, seed)],
     previous_hash=previous.block_hash,
     index=previous.index + 1,
-    timestamp=BASE_TS + (previous.index + 1) * STEP,
+    timestamp=BASE_TS + (previous.index + 1) * STEP if timestamp is None else timestamp,
     proposer_id=proposer,
     algorithm=algorithm,
     sealed_consensus=sealed,
@@ -50,15 +53,26 @@ def _candidate(env: NodeEnv, previous: Block, seed: int, algorithm, sealed, prop
   )
 
 
-def pow_block(env: NodeEnv, previous: Block, seed: int, *, difficulty: int = 1, proposer="node1"):
-  block = _candidate(env, previous, seed, "pow", {"nonce": 0, "difficulty": difficulty}, proposer)
+def pow_block(
+  env: NodeEnv,
+  previous: Block,
+  seed: int,
+  *,
+  difficulty: int = 1,
+  proposer="node1",
+  signer=None,
+  timestamp: int | None = None,
+):
+  block = _candidate(
+    env, previous, seed, "pow", {"nonce": 0, "difficulty": difficulty}, proposer, timestamp
+  )
   target = pow_target(difficulty)
   nonce = 0
   while int(block.block_hash, 16) >= target:
     nonce += 1
     changed = replace(block, sealed_consensus={"nonce": nonce, "difficulty": difficulty})
     block = replace(changed, block_hash=sha256_of_canonical(changed.preimage_dict()))
-  return attach_proposer_signature(block, env.node_key.private_key)
+  return attach_proposer_signature(block, (signer or env.node_key).private_key)
 
 
 def pow_chain(env: NodeEnv, length: int, *, difficulty: int = 1, proposer="node1") -> list[Block]:
@@ -87,8 +101,14 @@ def pbft_chain(env: NodeEnv, length: int, *, signers: int = 3) -> list[Block]:
 
 
 def save_chain(env: NodeEnv, blocks: list[Block]) -> None:
-  store = JsonChainStore(Path(env.env["CHAIN_PATH"]))
+  """Persist a chain as a node would have left it: with its (empty) PBFT state file, so a
+  restarted PBFT node does not fail closed on a missing state (it never voted here)."""
+  chain_path = Path(env.env["CHAIN_PATH"])
+  store = JsonChainStore(chain_path)
   try:
     store.save(blocks)
   finally:
     store.close()
+  state = PbftStateStore(state_path_for(chain_path))
+  if not state.exists():
+    state.save(PbftState())

@@ -8,7 +8,7 @@ from node_helpers import NodeEnv, pem_of
 
 from blockchain_core import ChainStoreMissingError, generate_issuer_keypair, generate_node_keypair
 from node.config import ConfigError, load_config
-from node.main import BootError
+from node.context import BootError
 from node.registries import RegistryError, load_validator_registry
 
 
@@ -19,6 +19,7 @@ def test_valid_env_loads(node_env: NodeEnv) -> None:
   assert config.cors_origins == ("http://localhost:5173",)
   assert config.max_page_size == 100
   assert config.init_chain is True
+  assert config.allow_loopback_peers is False
 
 
 @pytest.mark.parametrize("mode", ["powx", "PoW", "bft"])
@@ -44,7 +45,16 @@ def test_pow_needs_a_valid_difficulty(node_env: NodeEnv, value: str | None) -> N
 
 @pytest.mark.parametrize(
   ("key", "value"),
-  [("MAX_PAGE_SIZE", "0"), ("METADATA_MAX_BYTES", "-1"), ("INIT_CHAIN", "maybe")],
+  [
+    ("MAX_PAGE_SIZE", "0"),
+    ("MAX_PAGE_SIZE", "1001"),
+    ("METADATA_MAX_BYTES", "-1"),
+    ("INIT_CHAIN", "maybe"),
+    ("ALLOW_LOOPBACK_PEERS", "yes"),
+    ("MAX_FUTURE_SKEW_MS", "0"),  # also the PoW staleness bound: >= 1000 ms
+    ("MAX_FUTURE_SKEW_MS", "999"),
+    ("PBFT_ALLOW_MISSING_STATE", "maybe"),
+  ],
 )
 def test_bad_numeric_or_flag_values_fail(node_env: NodeEnv, key: str, value: str) -> None:
   with pytest.raises(ConfigError, match=key):
@@ -132,3 +142,8 @@ def test_issuer_key_mismatch_fails_fast(node_env, boot) -> None:
 def test_unknown_node_id_fails_fast(node_env, boot) -> None:
   with pytest.raises(BootError, match="NODE_ID"):
     boot({**node_env.env, "NODE_ID": "ghost"})
+
+
+def test_future_skew_minimum_is_one_second(node_env: NodeEnv) -> None:
+  assert load_config({**node_env.env, "MAX_FUTURE_SKEW_MS": "1000"}).max_future_skew_ms == 1000
+  assert load_config(node_env.env).max_future_skew_ms == 60_000
