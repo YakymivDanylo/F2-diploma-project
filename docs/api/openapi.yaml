@@ -1,0 +1,719 @@
+openapi: 3.0.3
+info:
+  title: Document Verification Node API
+  version: 1.0.0
+  description: |
+    Client and peer REST contract of one validator node of the decentralized
+    document verification network (container "Node", C4 level 2; SPA -> Node and
+    Node -> Node over HTTPS, TLS 1.3).
+
+    Authentication model (SRS section 6.2): the API has no user accounts, no OAuth2/OIDC
+    and no JWT. Read endpoints are public: a verifier does not have to trust the node,
+    because the Merkle proof and the ECDSA signature are checked locally.
+    Issuer authenticity is carried by the application-layer ECDSA P-256 signature of
+    the DocumentRecord, created by the node with the IssuerKeyPair of its own
+    institution and verified against the IssuerRegistry. Node identity is
+    carried by NodeKeyPair signatures on the WebSocket channels (/ws/blocks, /ws/pbft),
+    which are outside this REST contract. Every operation therefore declares
+    `security: []` explicitly.
+
+    Conventions: every error uses the envelope `Error`; hashes are 64 lowercase hex
+    characters (SHA-256); signatures are lowercase hex (ECDSA P-256, low-S);
+    timestamps are Unix epoch in milliseconds (integer); the default rate limit is
+    100 requests per 60 seconds per IP address (`RATE_LIMIT_PER_MIN`, SRS-NFR-SEC-05;
+    specified, not yet implemented in the node).
+  license:
+    name: Proprietary (academic project)
+servers:
+  - url: https://{host}:{port}
+    description: Validator node (demo network - node1..node4)
+    variables:
+      host:
+        default: localhost
+      port:
+        default: '8001'
+security: []
+tags:
+  - name: documents
+    description: Issuance and verification of documents.
+  - name: chain
+    description: Read-only access to the local chain replica (also used for synchronization).
+  - name: network
+    description: Node status and the peer registry.
+paths:
+  /documents:
+    post:
+      tags: [documents]
+      operationId: submitDocument
+      summary: Submit a document hash for issuance
+      description: |
+        Accepts an UNSIGNED `{hash, metadata}` pair. The node signs the resulting
+        DocumentRecord server-side with the IssuerKeyPair of its own institution and puts
+        it into the mempool (on a non-primary PBFT node the record is forwarded to the
+        primary over `forward_record`). The response is returned before the block is
+        finalized; the final state is observed through `GET /documents/{hash}` or the
+        `/ws/blocks` channel. A body that contains the field `signature`, a repeated JSON
+        key or an unknown field is rejected (422).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueRequest'
+            example:
+              hash: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+              metadata:
+                title: Bachelor diploma
+                holder: Student ID 434-A-17
+      responses:
+        '202':
+          description: The record is signed and accepted into the mempool.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssueAccepted'
+        '403':
+          description: The primary does not know the issuer of this node (`unregistered_issuer`, relayed from a forwarded submission).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The hash is already in a finalized block, in the mempool or in flight to the primary (`duplicate_hash`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: The request body exceeds the server limit (`payload_too_large`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: |
+            Validation failed (`validation_error`): malformed hash, unknown or forbidden
+            field (including `signature`), repeated JSON key, nesting that is too deep;
+            `metadata` not encodable (`invalid_metadata`) or larger than `METADATA_MAX_BYTES`
+            in canonical encoding (`metadata_too_large`); the primary rejected the forwarded
+            record (`invalid_record`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          description: |
+            A forwarded submission failed on the primary side: the primary refused the
+            forwarding channel (`not_validator`, `auth_failed`) or answered outside the
+            closed set of replies (`forward_protocol_error`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/responses/NotReady'
+  /documents/{hash}:
+    get:
+      tags: [documents]
+      operationId: getDocument
+      summary: Verify a document by its hash
+      description: |
+        Returns the finalized record, the identity of the issuer, the containing block
+        and the Merkle inclusion proof. The client recomputes the leaf hash from `record`,
+        folds the `merkle_proof` steps and compares the result with `merkle_root`.
+        `chain_valid` is the verdict of the node's validity cache: a verifier must not
+        trust a found record when it is false. A hash that is unknown or still waiting in
+        the mempool yields 404.
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          description: SHA-256 of the document content, 64 lowercase hex characters.
+          schema:
+            $ref: '#/components/schemas/Hash64'
+      responses:
+        '200':
+          description: The document is present in a finalized block.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentVerification'
+        '404':
+          description: No finalized record for this hash (`not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: The path parameter does not match `^[0-9a-f]{64}$` (`validation_error`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          description: |
+            Unhandled server error (`internal_error`) or a broken chain invariant
+            (`chain_integrity_error`: the hash occurs in more than one block or not exactly
+            once in its block; `details` names the block indexes).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /chain:
+    get:
+      tags: [chain]
+      operationId: getChainRange
+      summary: Read a bounded, inclusive range of blocks
+      description: |
+        Never returns the whole chain. The range is shortened to `MAX_PAGE_SIZE` blocks
+        (default 100); `truncated` reports the shortening. A start index above the tip
+        returns an empty page. Used by the SPA and by peers for synchronization.
+      parameters:
+        - name: from
+          in: query
+          description: First block index (inclusive).
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: to
+          in: query
+          description: Last block index (inclusive). Must be greater than or equal to `from`.
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: A page of blocks.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChainPage'
+        '422':
+          description: Invalid query (`validation_error`) or `to` below `from` (`invalid_range`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /node/info:
+    get:
+      tags: [network]
+      operationId: getNodeInfo
+      summary: Node identity, consensus mode and chain validity
+      description: |
+        Served from the validity cache in O(1). Used by the container healthcheck and by
+        the SPA to detect an invalid chain. `serving` is false until the startup sync is
+        done and while the node shuts down.
+      responses:
+        '200':
+          description: Current node status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeInfo'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /peers:
+    get:
+      tags: [network]
+      operationId: listPeers
+      summary: List registered peers
+      description: The peer registry is used for broadcast only and never changes the validator quorum.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 256
+            default: 256
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Registered peers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerList'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /peers/register:
+    post:
+      tags: [network]
+      operationId: registerPeer
+      summary: Register a peer node
+      description: |
+        Adds or refreshes a peer. Every registration carries a fresh `issued_at` and a
+        `signature` (domain `node/peer-register/v1`): a ValidatorSet identity signs with
+        the key the ValidatorSet holds for it, any other identity with the key it
+        registers. The address must be routable. The response contains this node itself
+        (signed) and the other known peers except the registrant. Registration does not
+        make the peer a validator: the ValidatorSet is static configuration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '200':
+          description: Peers known to this node.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerList'
+        '403':
+          description: The registration is unsigned, stale or its signature does not verify (`registration_unauthenticated`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The node_id is already registered with a different public key (`peer_key_mismatch`) or a newer registration for it is held (`stale_registration`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Invalid body or public key (`validation_error`) or a non-routable address (`invalid_peer_address`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: The peer registry is full (`peer_registry_full`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  responses:
+    TooManyRequests:
+      description: Rate limit exceeded (`rate_limited`).
+      headers:
+        Retry-After:
+          description: Seconds until the client may retry.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotReady:
+      description: |
+        Retryable refusal with `Retry-After`. `code` is one of `not_ready` (starting or
+        shutting down), `chain_invalid`, `no_primary` (view change in progress),
+        `not_primary`, `mempool_full`, `forward_timeout`, `forward_unavailable`.
+      headers:
+        Retry-After:
+          description: Seconds until the client may retry.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Unhandled server error (`internal_error`). The message never contains exception text.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Hash64:
+      type: string
+      pattern: '^[0-9a-f]{64}$'
+      minLength: 64
+      maxLength: 64
+      description: SHA-256 digest, lowercase hex.
+      example: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+    SignatureHex:
+      type: string
+      pattern: '^([0-9a-f]{2})+$'
+      minLength: 2
+      maxLength: 1024
+      description: Lowercase hex signature (ECDSA P-256 in DER form, low-S only).
+    EpochMillis:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Unix epoch in milliseconds.
+    Identifier:
+      type: string
+      pattern: '^[A-Za-z0-9._-]{1,64}$'
+    Metadata:
+      type: object
+      additionalProperties: true
+      description: |
+        Free-form document metadata. Numbers must be integers (floating point is rejected).
+        The canonical encoding must not exceed `METADATA_MAX_BYTES` (default 1024 bytes).
+    IssueRequest:
+      type: object
+      required: [hash, metadata]
+      additionalProperties: false
+      properties:
+        hash:
+          $ref: '#/components/schemas/Hash64'
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+    IssueAccepted:
+      type: object
+      required: [document_hash, issuer_id, issued_at, status]
+      properties:
+        document_hash:
+          $ref: '#/components/schemas/Hash64'
+        issuer_id:
+          $ref: '#/components/schemas/Identifier'
+        issued_at:
+          $ref: '#/components/schemas/EpochMillis'
+        status:
+          type: string
+          enum: [accepted]
+          description: The record is signed and accepted for finalization; the finalized state is read through `GET /documents/{hash}`.
+    DocumentRecord:
+      type: object
+      required: [document_hash, issuer_id, issued_at, metadata, ipfs_cid, signature]
+      properties:
+        document_hash:
+          $ref: '#/components/schemas/Hash64'
+        issuer_id:
+          $ref: '#/components/schemas/Identifier'
+        issued_at:
+          $ref: '#/components/schemas/EpochMillis'
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+        ipfs_cid:
+          type: string
+          nullable: true
+          maxLength: 128
+        signature:
+          $ref: '#/components/schemas/SignatureHex'
+    ProofStep:
+      type: object
+      required: [position]
+      properties:
+        position:
+          type: string
+          enum: [left, right, promoted]
+          description: Side of the sibling; `promoted` marks an odd node passed up unchanged (no `sibling_hash`).
+        sibling_hash:
+          $ref: '#/components/schemas/Hash64'
+    DocumentVerification:
+      type: object
+      required:
+        - document_hash
+        - issuer_id
+        - issuer_name
+        - issued_at
+        - block_index
+        - chain_valid
+        - merkle_root
+        - merkle_proof
+        - record
+      properties:
+        document_hash:
+          $ref: '#/components/schemas/Hash64'
+        issuer_id:
+          $ref: '#/components/schemas/Identifier'
+        issuer_name:
+          type: string
+          maxLength: 128
+          description: Display name from the IssuerRegistry; equals `issuer_id` by default. Not signed.
+        issued_at:
+          $ref: '#/components/schemas/EpochMillis'
+        block_index:
+          type: integer
+          minimum: 1
+        chain_valid:
+          type: boolean
+          description: Verdict of the node's validity cache. A verifier must not trust a found record when it is false.
+        merkle_root:
+          $ref: '#/components/schemas/Hash64'
+        merkle_proof:
+          type: array
+          maxItems: 9
+          description: Path from the leaf to the root (at most 9 levels for 500 records).
+          items:
+            $ref: '#/components/schemas/ProofStep'
+        record:
+          $ref: '#/components/schemas/DocumentRecord'
+    CommitSignature:
+      type: object
+      required: [node_id, signature]
+      properties:
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        signature:
+          $ref: '#/components/schemas/SignatureHex'
+    Block:
+      type: object
+      required:
+        - index
+        - timestamp
+        - previous_hash
+        - merkle_root
+        - proposer_id
+        - algorithm
+        - sealed_consensus
+        - document_records
+        - block_hash
+        - proposer_signature
+        - commit_signatures
+      properties:
+        index:
+          type: integer
+          minimum: 0
+        timestamp:
+          $ref: '#/components/schemas/EpochMillis'
+        previous_hash:
+          $ref: '#/components/schemas/Hash64'
+        merkle_root:
+          $ref: '#/components/schemas/Hash64'
+        proposer_id:
+          type: string
+          nullable: true
+          description: Null only for the genesis block.
+        algorithm:
+          type: string
+          enum: [genesis, pow, pbft]
+        sealed_consensus:
+          type: object
+          description: 'pow: {nonce, difficulty}; pbft: {view_number}; genesis: {}.'
+          additionalProperties: true
+        document_records:
+          type: array
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/DocumentRecord'
+        block_hash:
+          $ref: '#/components/schemas/Hash64'
+        proposer_signature:
+          type: string
+          nullable: true
+        commit_signatures:
+          type: array
+          items:
+            $ref: '#/components/schemas/CommitSignature'
+    ChainPage:
+      type: object
+      required: [from_index, to_index, tip_index, truncated, blocks]
+      properties:
+        from_index:
+          type: integer
+          minimum: 0
+        to_index:
+          type: integer
+          nullable: true
+          description: Last index returned; null when the page is empty.
+        tip_index:
+          type: integer
+          minimum: 0
+        truncated:
+          type: boolean
+          description: The requested range exceeded the page cap and was shortened.
+        blocks:
+          type: array
+          description: At most `MAX_PAGE_SIZE` blocks (default 100; the value is node configuration).
+          items:
+            $ref: '#/components/schemas/Block'
+    NodeInfo:
+      type: object
+      required:
+        - node_id
+        - algorithm
+        - n
+        - f
+        - node_public_key
+        - tip_index
+        - chain_valid
+        - first_invalid_index
+        - quorum_status
+        - liveness
+        - byzantine_events
+        - issuer_id
+        - issuer_name
+        - peer_health
+        - serving
+      properties:
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        algorithm:
+          type: string
+          enum: [pow, pbft]
+        n:
+          type: integer
+          minimum: 1
+          description: Size of the configured ValidatorSet (carries no quorum meaning in PoW mode).
+        f:
+          type: integer
+          minimum: 0
+        node_public_key:
+          type: string
+          description: PEM public key of the NodeKeyPair.
+        tip_index:
+          type: integer
+          minimum: 0
+        chain_valid:
+          type: boolean
+        first_invalid_index:
+          type: integer
+          nullable: true
+        quorum_status:
+          type: string
+          enum:
+            - healthy
+            - quorum_invalid
+            - byzantine_event_detected
+            - view_change_in_progress
+            - crash_fault_quorum_loss
+          description: |
+            Precedence: byzantine_event_detected (sticky) over quorum_invalid (the chain
+            failed the commit-quorum check) over the liveness of the PBFT engine
+            (view_change_in_progress, crash_fault_quorum_loss). See SRS-FUN-41.
+        liveness:
+          type: string
+          enum: [healthy, view_change_in_progress, crash_fault_quorum_loss]
+          description: Engine liveness, always shown on its own so a sticky Byzantine status does not hide it.
+        byzantine_events:
+          type: array
+          description: Recent equivocation or safety-violation reports (bounded log).
+          items:
+            type: object
+            additionalProperties: true
+        issuer_id:
+          $ref: '#/components/schemas/Identifier'
+        issuer_name:
+          type: string
+        peer_health:
+          type: object
+          description: node_id to link state.
+          additionalProperties:
+            type: string
+            enum: [up, reconnecting, down]
+        serving:
+          type: boolean
+          description: False until the startup sync is done and while the node shuts down.
+    RegisterRequest:
+      type: object
+      required: [node_id, host, port, public_key]
+      additionalProperties: false
+      properties:
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        host:
+          type: string
+          pattern: '^[A-Za-z0-9.-]{1,253}$'
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        public_key:
+          type: string
+          maxLength: 2048
+          description: PEM public key of the peer NodeKeyPair.
+        issued_at:
+          $ref: '#/components/schemas/EpochMillis'
+        signature:
+          $ref: '#/components/schemas/SignatureHex'
+    PeerOut:
+      type: object
+      required: [node_id, host, port, public_key]
+      properties:
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        host:
+          type: string
+          pattern: '^[A-Za-z0-9.-]{1,253}$'
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        public_key:
+          type: string
+          maxLength: 2048
+        issued_at:
+          $ref: '#/components/schemas/EpochMillis'
+        signature:
+          $ref: '#/components/schemas/SignatureHex'
+        last_seen:
+          type: integer
+          format: int64
+          nullable: true
+    PeerList:
+      type: object
+      required: [peers]
+      properties:
+        peers:
+          type: array
+          items:
+            $ref: '#/components/schemas/PeerOut'
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details]
+          properties:
+            code:
+              type: string
+              enum:
+                - validation_error
+                - invalid_range
+                - invalid_metadata
+                - metadata_too_large
+                - invalid_record
+                - unregistered_issuer
+                - duplicate_hash
+                - not_found
+                - method_not_allowed
+                - payload_too_large
+                - chain_integrity_error
+                - registration_unauthenticated
+                - peer_key_mismatch
+                - stale_registration
+                - invalid_peer_address
+                - peer_registry_full
+                - not_validator
+                - auth_failed
+                - forward_protocol_error
+                - not_ready
+                - chain_invalid
+                - no_primary
+                - not_primary
+                - mempool_full
+                - forward_timeout
+                - forward_unavailable
+                - rate_limited
+                - http_error
+                - internal_error
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
